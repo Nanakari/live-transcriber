@@ -1,0 +1,5 @@
+# Copy this file to config.local.yaml for machine-specific settings.
+# config.local.yaml is ignored by Git.
+
+network:
+  proxy: "http://127.0.0.1:7897"

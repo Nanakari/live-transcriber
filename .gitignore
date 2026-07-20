@@ -10,6 +10,7 @@ env/
 .env
 *.env
 secrets.local.env
+config.local.yaml
 
 # Runtime and generated output
 output/

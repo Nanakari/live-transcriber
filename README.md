@@ -1,5 +1,7 @@
 # 多语言影音研析
 
+[![CI](https://github.com/Nanakari/live-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/Nanakari/live-transcriber/actions/workflows/ci.yml)
+
 这是一个在本机运行的多语言影音处理工具。它可以读取 YouTube 等网络视频，或本地音频/视频文件，自动识别原文语言并生成：
 
 - 带时间轴的原文转写稿
@@ -94,6 +96,10 @@ analysis:
   profile: "multilingual_study"
 ```
 
+公共配置不启用代理。需要本机代理或其他覆盖项时，将
+`config.local.example.yaml` 复制为 `config.local.yaml` 后修改；该文件不会被 Git
+跟踪。
+
 日语任务仍可使用 `dictionaries/vtuber_terms.txt` 作为默认术语提示；其他语言不会自动加载这份日语词表。
 
 ## 输出目录
@@ -127,3 +133,20 @@ pip install -r requirements.txt
 ```
 
 如遇问题，可在网页展开“实时详细日志”，或查看对应任务目录和 `outputs/web_jobs/` 下的日志。
+
+## 开发与验证
+
+开发依赖和检查命令：
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m compileall -q app main.py
+```
+
+提交改动前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题和敏感信息处理方式见
+[SECURITY.md](SECURITY.md)。
+
+## 许可证
+
+本仓库目前尚未授予开源许可证。除非另有明确说明，否则公开可见不代表允许复制、修改或分发。
