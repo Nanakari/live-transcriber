@@ -1,0 +1,86 @@
+﻿app:
+  output_dir: "outputs"
+  timezone: "Asia/Tokyo"
+
+transcribe:
+  quality: "high"
+  language: "auto"
+  device: "auto"
+  compute_type: "int8_float16"
+  condition_on_previous_text: true
+
+quality_profiles:
+  fast:
+    model: "small"
+    beam_size: 5
+    vad_filter: true
+    word_timestamps: false
+
+  accurate:
+    model: "medium"
+    beam_size: 8
+    vad_filter: true
+    word_timestamps: true
+
+  cpu_safe:
+    model: "medium"
+    beam_size: 5
+    vad_filter: true
+    word_timestamps: false
+    preferred_device: "cpu"
+    preferred_compute_type: "int8"
+
+  high:
+    model: "large-v3-turbo"
+    beam_size: 5
+    vad_filter: true
+    word_timestamps: true
+    preferred_device: "cuda"
+    preferred_compute_type: "int8_float16"
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  delete_clean_wav_after_transcribe: true
+
+network:
+  proxy: "http://127.0.0.1:7897"
+
+dictionary:
+  terms_path: "dictionaries/vtuber_terms.txt"
+
+cleaner:
+  no_speech_prob_threshold: 0.9
+
+runtime:
+  auto_add_cuda_dll_paths: true
+  cuda_dll_paths:
+    - ".venv/Lib/site-packages/nvidia/cublas/bin"
+    - ".venv/Lib/site-packages/nvidia/cudnn/bin"
+    - ".venv/Lib/site-packages/nvidia/cuda_nvrtc/bin"
+
+analysis:
+  provider: "gemini"
+  model: "gemini-3.1-flash-lite"
+  api_key_env: "GEMINI_API_KEY"
+  source_language: ""
+  target_language: "zh"
+  profile: "multilingual_study"
+  chunk_minutes: 2
+  max_segments_per_chunk: 28
+  temperature: 0.2
+  max_retries: 6
+  retry_backoff_seconds: 10
+  request_timeout_seconds: 300
+  request_interval_seconds: 6
+  cache_enabled: true
+  output_formats:
+    - "json"
+    - "markdown"
+    - "srt"
+
+
+
+
+
+

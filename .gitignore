@@ -1,0 +1,33 @@
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Local secrets and environment overrides
+.env
+*.env
+secrets.local.env
+
+# Runtime and generated output
+output/
+outputs/
+*.log
+*.pid
+
+# Build and packaged artifacts
+build/
+dist/
+*.exe
+*.spec.bak
+
+# Browser automation state
+.playwright-cli/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
