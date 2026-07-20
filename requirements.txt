@@ -1,6 +1,6 @@
 faster-whisper
 yt-dlp
-pydantic>=2.0
+pydantic>=2.13.4
 PyYAML
 rich
 tzdata
