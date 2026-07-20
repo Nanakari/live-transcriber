@@ -44,7 +44,9 @@ audio:
   delete_clean_wav_after_transcribe: true
 
 network:
-  proxy: "http://127.0.0.1:7897"
+  # Keep shared defaults portable. Put a machine-specific proxy in
+  # config.local.yaml instead.
+  proxy: ""
 
 dictionary:
   terms_path: "dictionaries/vtuber_terms.txt"

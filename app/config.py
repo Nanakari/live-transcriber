@@ -40,7 +40,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "audio": {"sample_rate": 16000, "channels": 1, "delete_clean_wav_after_transcribe": True},
-    "network": {"proxy": "http://127.0.0.1:7897"},
+    "network": {"proxy": ""},
     "dictionary": {"terms_path": "dictionaries/vtuber_terms.txt"},
     "cleaner": {"no_speech_prob_threshold": 0.9},
     "runtime": {
@@ -96,19 +96,26 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
-def load_config() -> dict[str, Any]:
-    config_path = project_root() / "config.yaml"
-    if not config_path.exists():
-        return deepcopy(DEFAULT_CONFIG)
+def _read_config_file(config_path: Path) -> dict[str, Any]:
     try:
         loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
-        raise AppError(f"config.yaml 格式错误：{exc}") from exc
+        raise AppError(f"{config_path.name} 格式错误：{exc}") from exc
     except UnicodeDecodeError as exc:
-        raise AppError("config.yaml 必须使用 UTF-8 编码。") from exc
+        raise AppError(f"{config_path.name} 必须使用 UTF-8 编码。") from exc
     if not isinstance(loaded, dict):
-        raise AppError("config.yaml 顶层必须是 YAML 字典。")
-    return _deep_merge(DEFAULT_CONFIG, loaded)
+        raise AppError(f"{config_path.name} 顶层必须是 YAML 字典。")
+    return loaded
+
+
+def load_config() -> dict[str, Any]:
+    root = project_root()
+    config = deepcopy(DEFAULT_CONFIG)
+    for name in ("config.yaml", "config.local.yaml"):
+        config_path = root / name
+        if config_path.exists():
+            config = _deep_merge(config, _read_config_file(config_path))
+    return config
 
 
 
