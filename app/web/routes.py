@@ -2,20 +2,24 @@
 
 import os
 import re
+import shutil
 import socket
 import sys
+import io
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from ..config import load_config, project_root, resource_root
+from ..config import load_config, project_root, resource_root, tool_path
 from ..output_layout import ensure_media_subdirs, group_dir_from_artifact_path, group_name_from_stem, media_group_dir, media_root
 from ..utils import command_exists, is_cuda_available
 from .jobs import cli_command_prefix, jobs
 from .lifecycle import lifecycle
+from ..media_assets import default_thumbnail_path
 from .security import browse_file, open_file, open_folder, open_potplayer, read_text_preview, resolve_allowed_path
 
 
@@ -25,7 +29,7 @@ templates = Jinja2Templates(directory=str(resource_root() / "app" / "web" / "tem
 
 @router.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(request, "workbench.html")
 
 
 @router.get("/api/status")
@@ -33,13 +37,20 @@ def status() -> dict[str, Any]:
     config = load_config()
     analysis = config.get("analysis", {})
     return {
+        "defaults": {"language": config["transcribe"]["language"], "quality": config["transcribe"]["quality"],
+                     "device": config["transcribe"]["device"], "proxy": config["network"]["proxy"],
+                     "features": config["features"]},
+        "data_dir": str(project_root()),
+        "models_dir": os.environ.get("HF_HOME", str(project_root() / "models")),
+        "file_picker": os.name == "nt",
         "python": sys.executable,
-        "ffmpeg": command_exists("ffmpeg") or (project_root() / "tools" / "ffmpeg.exe").exists(),
-        "yt_dlp": command_exists("yt-dlp"),
+        "ffmpeg": command_exists("ffmpeg") or bool(tool_path("ffmpeg")),
+        "yt_dlp": _module_available("yt_dlp"),
         "faster_whisper": _module_available("faster_whisper"),
         "cuda": is_cuda_available(),
         "default_asr_profile": config.get("transcribe", {}).get("quality", ""),
         "gemini_model": analysis.get("model", ""),
+        "gemini_fallback_model": analysis.get("fallback_model", ""),
         "gemini_api_key_detected": bool(os.environ.get(analysis.get("api_key_env", "GEMINI_API_KEY"))),
         "gemini_api_key_validated": False,
         "paths": {"media": str(media_root().resolve())},
@@ -111,7 +122,7 @@ def start_transcribe(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     _append_optional(command, "--beam-size", payload.get("beam_size"))
     _append_optional(command, "--download-start", payload.get("download_start"))
     _append_optional(command, "--download-end", payload.get("download_end"))
-    _append_optional(command, "--proxy", payload.get("proxy") or default_proxy)
+    command.extend(["--proxy", str(payload.get("proxy", default_proxy) or "")])
     cookies = str(payload.get("cookies") or "").strip()
     cookies_from_browser = "" if cookies else str(payload.get("cookies_from_browser") or "").strip()
     _append_optional(command, "--cookies-from-browser", cookies_from_browser)
@@ -133,10 +144,14 @@ def start_analyze(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     if not input_file:
         raise HTTPException(status_code=400, detail="请选择 transcript.json。")
     api_key = str(payload.get("gemini_api_key") or "").strip()
+    if not payload.get("dry_run"):
+        _require_analysis_key(api_key)
     command = cli_command_prefix() + ["analyze", "--input", input_file]
+    _append_feature_flags(command, payload)
     _append_optional(command, "--provider", payload.get("provider") or "gemini")
     _append_optional(command, "--profile", payload.get("profile") or "multilingual_study")
     _append_optional(command, "--model", payload.get("model"))
+    _append_optional(command, "--fallback-model", payload.get("fallback_model"))
     limit = payload.get("limit_chunks")
     if limit not in (None, ""):
         command += ["--limit-chunks", str(limit)]
@@ -146,7 +161,7 @@ def start_analyze(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         command.append("--resume")
     if payload.get("debug"):
         command.append("--debug")
-    env_overrides = {"GEMINI_API_KEY": api_key} if api_key else None
+    env_overrides = _analysis_environment(payload, api_key)
     return jobs.start("analyze", command, env_overrides=env_overrides).public()
 
 
@@ -158,8 +173,11 @@ def start_pipeline(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     modules = _selected_pipeline_modules(payload)
     if not modules:
         raise HTTPException(status_code=400, detail="请至少勾选一个模块。")
+    if "analyze" in modules:
+        _require_analysis_key(str(payload.get("gemini_api_key") or "").strip())
 
     command = cli_command_prefix() + ["pipeline", "--modules", ",".join(modules)]
+    _append_feature_flags(command, payload)
     url = str(payload.get("url") or "").strip()
     input_path = str(payload.get("input") or "").strip()
     if "transcribe" in modules:
@@ -182,7 +200,7 @@ def start_pipeline(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     _append_optional(command, "--beam-size", payload.get("beam_size"))
     _append_optional(command, "--download-start", payload.get("download_start"))
     _append_optional(command, "--download-end", payload.get("download_end"))
-    _append_optional(command, "--proxy", payload.get("proxy") or default_proxy)
+    command.extend(["--proxy", str(payload.get("proxy", default_proxy) or "")])
     cookies = str(payload.get("cookies") or "").strip()
     cookies_from_browser = "" if cookies else str(payload.get("cookies_from_browser") or "").strip()
     _append_optional(command, "--cookies-from-browser", cookies_from_browser)
@@ -197,6 +215,7 @@ def start_pipeline(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     _append_optional(command, "--provider", payload.get("provider") or "gemini")
     _append_optional(command, "--profile", payload.get("profile") or "multilingual_study")
     _append_optional(command, "--analysis-model", payload.get("analysis_model"))
+    _append_optional(command, "--analysis-fallback-model", payload.get("analysis_fallback_model"))
     limit = payload.get("limit_chunks")
     if limit not in (None, ""):
         command += ["--limit-chunks", str(limit)]
@@ -208,8 +227,19 @@ def start_pipeline(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         command.append("--debug")
 
     api_key = str(payload.get("gemini_api_key") or "").strip()
-    env_overrides = {"GEMINI_API_KEY": api_key} if api_key else None
+    env_overrides = _analysis_environment(payload, api_key)
     return jobs.start("pipeline", command, env_overrides=env_overrides).public()
+
+
+def _analysis_environment(payload: dict[str, Any], api_key: str) -> dict[str, str]:
+    config = load_config()
+    environment = {}
+    if api_key:
+        environment[config.get("analysis", {}).get("api_key_env", "GEMINI_API_KEY")] = api_key
+    proxy = str(payload.get("proxy", config.get("network", {}).get("proxy", "")) or "").strip()
+    if proxy:
+        environment.update(HTTP_PROXY=proxy, HTTPS_PROXY=proxy)
+    return environment
 
 
 @router.post("/api/preview")
@@ -246,6 +276,56 @@ def _selected_pipeline_modules(payload: dict[str, Any]) -> list[str]:
     return [name for name, enabled in pairs if enabled]
 
 
+def _append_feature_flags(command: list[str], payload: dict[str, Any]) -> None:
+    for name in ("character_profile", "summary", "study_notes"):
+        if name not in payload:
+            continue
+        value = payload[name]
+        if not isinstance(value, bool):
+            raise HTTPException(status_code=422, detail=f"{name} 必须是布尔值。")
+        command.append("--" + ("" if value else "no-") + name.replace("_", "-"))
+
+
+def _require_analysis_key(api_key: str) -> None:
+    key_env = load_config()["analysis"]["api_key_env"]
+    if not api_key and not os.environ.get(key_env, "").strip():
+        raise HTTPException(status_code=400, detail="请先在设置中填写 Gemini API Key，或选择仅转写。")
+
+
+@router.get("/api/download")
+def download_result(path: str = Query(...)):
+    target = resolve_allowed_path(path, must_be_text=True)
+    try:
+        target.relative_to((project_root() / "outputs").resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="只能下载处理结果。")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在。")
+    return FileResponse(target, filename=target.name)
+
+
+@router.get("/api/artifacts/{run_id}/export")
+def export_artifact(run_id: str):
+    item = next((item for item in _artifact_sets(project_root()) if item["run_id"] == run_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="没有找到任务。")
+    paths: list[Path] = []
+    if item.get("transcript"):
+        transcript = Path(item["transcript"]["path"])
+        paths.extend([transcript, transcript.with_suffix(".md"), transcript.with_suffix(".srt")])
+    paths.extend(Path(value["path"]) for value in (item.get("analysis") or {}).get("files", {}).values()
+                 if value and Path(value["path"]).suffix in {".md", ".srt", ".json"})
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in paths:
+            target = resolve_allowed_path(str(path), must_be_text=True)
+            if target.is_file():
+                archive.write(target, target.name)
+    buffer.seek(0)
+    return StreamingResponse(buffer, media_type="application/zip",
+                             headers={"Content-Disposition": 'attachment; filename="transcriber-results.zip"'})
+
+
 @router.get("/api/jobs")
 def list_jobs() -> list[dict[str, Any]]:
     return jobs.list_jobs()
@@ -265,6 +345,13 @@ def get_job_log(job_id: str) -> dict[str, Any]:
 @router.post("/api/jobs/{job_id}/stop")
 def stop_job(job_id: str) -> dict[str, Any]:
     return jobs.stop(job_id)
+
+
+@router.delete("/api/artifacts/{run_id}")
+def delete_artifact(run_id: str) -> dict[str, Any]:
+    if jobs.has_running_jobs():
+        raise HTTPException(status_code=409, detail="有任务正在运行，请等待任务结束后再删除文件组。")
+    return _delete_artifact_run(run_id, project_root())
 
 
 @router.get("/api/file")
@@ -316,7 +403,10 @@ def _default_cover_for_preview(subtitle: str, audio: str) -> str:
     for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
         candidates.extend(legacy.glob(pattern))
     existing = [path for path in candidates if path.exists() and path.is_file()]
-    return str(max(existing, key=lambda path: path.stat().st_mtime).resolve()) if existing else ""
+    if existing:
+        return str(max(existing, key=lambda path: path.stat().st_mtime).resolve())
+    fallback = default_thumbnail_path()
+    return str(fallback.resolve()) if fallback.exists() and fallback.is_file() else ""
 
 
 def _transcript_run_id_from_analysis_file(path: Path) -> str:
@@ -421,12 +511,15 @@ def _recent_dirs_many(bases: list[Path], *, recursive: bool = False, limit: int 
 def _latest_analysis(base: Path) -> dict[str, Any] | None:
     if not base.exists():
         return None
-    required = ["analysis.json", "bilingual.md", "translation_zh.srt", "vocabulary.md", "grammar.md", "review.md"]
+    required = ["analysis.json", "bilingual.md", "translation_zh.srt", "review.md"]
     candidates = [path for path in base.rglob("*") if path.is_dir() and all((path / name).exists() for name in required)]
     if not candidates:
         return None
     run = max(candidates, key=lambda path: path.stat().st_mtime)
     files = {name: _file_item(run / name) for name in required}
+    for name in ("vocabulary.md", "grammar.md"):
+        if (run / name).exists():
+            files[name] = _file_item(run / name)
     if (run / "study_notes.md").exists():
         files["study_notes.md"] = _file_item(run / "study_notes.md")
     if (run / "video_summary.md").exists():
@@ -552,6 +645,19 @@ def _artifact_sets(root: Path) -> list[dict[str, Any]]:
             latest_mtime = max(latest_mtime, Path(analysis["path"]).stat().st_mtime)
         if preview:
             latest_mtime = max(latest_mtime, Path(preview["path"]).stat().st_mtime)
+        related_paths = [
+            path
+            for path in [
+                transcript,
+                source_audio,
+                clean_audio,
+                Path(analysis["path"]) if analysis else None,
+                Path(preview["path"]) if preview else None,
+            ]
+            if path and path.exists()
+        ]
+        group_dir = _artifact_group_dir(related_paths, root)
+        storage_bytes, storage_file_count = _path_storage(group_dir) if group_dir else _paths_storage(related_paths)
         items.append(
             {
                 "run_id": run_id,
@@ -562,10 +668,84 @@ def _artifact_sets(root: Path) -> list[dict[str, Any]]:
                 "clean_audio": _file_item(clean_audio) if clean_audio and clean_audio.exists() else None,
                 "analysis": analysis,
                 "preview": preview,
+                "storage_bytes": storage_bytes,
+                "storage_file_count": storage_file_count,
+                "group_path": str(group_dir) if group_dir else "",
+                "deletable": group_dir is not None,
             }
         )
     items.sort(key=lambda item: item["modified"], reverse=True)
     return items
+
+
+def _artifact_group_dir(paths: list[Path], root: Path) -> Path | None:
+    """Return one complete media group only when every related path belongs to it."""
+    media_base = (root / "outputs" / "media").resolve()
+    groups: set[Path] = set()
+    for path in paths:
+        try:
+            relative = path.resolve().relative_to(media_base)
+        except (OSError, ValueError):
+            return None
+        if len(relative.parts) < 2:
+            return None
+        groups.add((media_base / relative.parts[0]).resolve())
+    if len(groups) != 1:
+        return None
+    group_dir = next(iter(groups))
+    if group_dir.parent != media_base or not group_dir.is_dir() or group_dir.is_symlink():
+        return None
+    return group_dir
+
+
+def _path_storage(path: Path) -> tuple[int, int]:
+    return _paths_storage([path])
+
+
+def _paths_storage(paths: list[Path]) -> tuple[int, int]:
+    total_bytes = 0
+    file_count = 0
+    seen: set[str] = set()
+    for path in paths:
+        candidates = path.rglob("*") if path.is_dir() else [path]
+        for candidate in candidates:
+            try:
+                if not candidate.is_file():
+                    continue
+                key = os.path.normcase(str(candidate.absolute()))
+                if key in seen:
+                    continue
+                seen.add(key)
+                total_bytes += candidate.stat().st_size
+                file_count += 1
+            except OSError:
+                continue
+    return total_bytes, file_count
+
+
+def _delete_artifact_run(run_id: str, root: Path) -> dict[str, Any]:
+    item = next((value for value in _artifact_sets(root) if value["run_id"] == run_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="没有找到该次转录，文件可能已经被删除。")
+    if not item.get("deletable") or not item.get("group_path"):
+        raise HTTPException(status_code=409, detail="该文件组使用旧版跨目录结构，无法安全地从页面整组删除。")
+
+    media_base = (root / "outputs" / "media").resolve()
+    target = Path(str(item["group_path"])).resolve()
+    if target.parent != media_base or target == media_base or not target.is_dir() or target.is_symlink():
+        raise HTTPException(status_code=400, detail="拒绝删除：目标不是有效的媒体文件组目录。")
+
+    storage_bytes, storage_file_count = _path_storage(target)
+    try:
+        shutil.rmtree(target)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"删除文件组失败：{exc}") from exc
+    return {
+        "run_id": run_id,
+        "deleted_path": str(target),
+        "deleted_bytes": storage_bytes,
+        "deleted_file_count": storage_file_count,
+    }
 
 
 
@@ -626,8 +806,11 @@ def _audio_from_transcript(transcript: Path | None) -> Path | None:
         import json
 
         meta = json.loads(transcript.read_text(encoding="utf-8")).get("meta", {})
-        path = Path(str(meta.get("source_audio_file") or ""))
-        return path if path.exists() else None
+        value = str(meta.get("source_audio_file") or "").strip()
+        if not value:
+            return None
+        path = Path(value)
+        return path if path.exists() and path.is_file() else None
     except Exception:
         return None
 
@@ -639,8 +822,11 @@ def _clean_audio_from_transcript(transcript: Path | None) -> Path | None:
         import json
 
         meta = json.loads(transcript.read_text(encoding="utf-8")).get("meta", {})
-        path = Path(str(meta.get("clean_audio_file") or ""))
-        return path if path.exists() else None
+        value = str(meta.get("clean_audio_file") or "").strip()
+        if not value:
+            return None
+        path = Path(value)
+        return path if path.exists() and path.is_file() else None
     except Exception:
         return None
 
@@ -701,10 +887,13 @@ def _format_run_label(run_id: str) -> str:
 
 
 def _latest_analysis_result(run: Path) -> dict[str, Any] | None:
-    required = ["analysis.json", "bilingual.md", "translation_zh.srt", "vocabulary.md", "grammar.md", "review.md"]
+    required = ["analysis.json", "bilingual.md", "translation_zh.srt", "review.md"]
     if not all((run / name).exists() for name in required):
         return None
     files = {name: _file_item(run / name) for name in required}
+    for name in ("vocabulary.md", "grammar.md"):
+        if (run / name).exists():
+            files[name] = _file_item(run / name)
     if (run / "study_notes.md").exists():
         files["study_notes.md"] = _file_item(run / "study_notes.md")
     if (run / "video_summary.md").exists():

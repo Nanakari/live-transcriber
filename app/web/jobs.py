@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import os
+import json
+import signal
 import re
 import subprocess
 import sys
@@ -13,7 +15,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from ..config import project_root
+from ..config import project_root, resource_root
 from ..utils import generate_run_id, hidden_process_flags
 
 
@@ -41,9 +43,11 @@ class Job:
     progress_updated_at: str | None = None
     stage_samples: deque[tuple[datetime, float]] = field(default_factory=lambda: deque(maxlen=30), repr=False)
     proc: subprocess.Popen[str] | None = field(default=None, repr=False)
+    cancelled: threading.Event = field(default_factory=threading.Event, repr=False)
+    analysis_status: dict[str, Any] = field(default_factory=dict)
 
     def public(self) -> dict[str, Any]:
-        now = datetime.now()
+        now = datetime.fromisoformat(self.finished_at) if self.finished_at else datetime.now()
         elapsed_seconds = _elapsed_seconds(self.started_at, now)
         stage_elapsed_seconds = _elapsed_seconds(self.stage_started_at, now)
         last_activity_seconds = _elapsed_seconds(self.last_log_at, now)
@@ -59,6 +63,7 @@ class Job:
             "pid": self.pid,
             "returncode": self.returncode,
             "error": self.error,
+            "analysis_status": self.analysis_status,
             "log_path": self.log_path,
             "recent_logs": list(self.recent_logs),
             "progress": self.progress,
@@ -107,7 +112,7 @@ class JobManager:
 
     def has_running_jobs(self) -> bool:
         with self._lock:
-            return any(job.status in {"pending", "running"} for job in self._jobs.values())
+            return any(job.status in {"pending", "running", "stopping"} for job in self._jobs.values())
 
     def get_job(self, job_id: str) -> Job:
         with self._lock:
@@ -150,28 +155,39 @@ class JobManager:
 
     def stop(self, job_id: str) -> dict[str, Any]:
         job = self.get_job(job_id)
-        if not job.proc or job.status != "running":
-            return job.public()
-        job.proc.terminate()
-        job.status = "stopped"
-        job.error = "stop requested"
+        with self._lock:
+            if job.status not in {"pending", "running", "stopping"}:
+                return job.public()
+            job.cancelled.set()
+            job.status = "stopping"
+            proc = job.proc
+        if proc:
+            terminate_process_tree(proc)
         return job.public()
 
     def stop_all(self) -> None:
         with self._lock:
-            active = [job for job in self._jobs.values() if job.proc and job.status in {"pending", "running"}]
+            active = [job for job in self._jobs.values() if job.status in {"pending", "running", "stopping"}]
         for job in active:
             try:
-                job.proc.terminate()
+                self.stop(job.job_id)
             except Exception:
                 pass
-            job.status = "stopped"
-            job.error = "shutdown requested"
 
     def _append_log(self, job: Job, text: str) -> None:
         line = text.rstrip("\r\n")
         if not line:
             return
+        if line.startswith("ARTIFACT_RESULT "):
+            try:
+                job.output_dir = json.loads(line.split(" ", 1)[1]).get("output_dir") or job.output_dir
+            except (ValueError, AttributeError):
+                pass
+        if line.startswith("ANALYSIS_STATUS "):
+            try:
+                job.analysis_status = json.loads(line.split(" ", 1)[1])
+            except ValueError:
+                pass
         now = datetime.now()
         job.last_log_at = now.isoformat(timespec="seconds")
         before = dict(job.progress)
@@ -205,29 +221,34 @@ class JobManager:
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
         try:
-            job.proc = subprocess.Popen(
-                job.command,
-                cwd=str(project_root()),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-                creationflags=hidden_process_flags(),
-            )
+            with self._lock:
+                if job.cancelled.is_set():
+                    job.status = "stopped"
+                    return
+                job.proc = subprocess.Popen(
+                    job.command, cwd=str(project_root()), stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                    env=env, creationflags=hidden_process_flags(), start_new_session=os.name != "nt",
+                )
             job.pid = job.proc.pid
             assert job.proc.stdout is not None
             for line in job.proc.stdout:
                 self._append_log(job, line)
             job.returncode = job.proc.wait()
-            if job.status != "stopped":
+            if job.cancelled.is_set():
+                job.status = "stopped"
+                job.progress = {**job.progress, "label": "已取消"}
+            else:
                 job.status = "succeeded" if job.returncode == 0 else "failed"
+                if job.returncode == 2 and job.analysis_status:
+                    job.status = "partial"
                 if job.status == "succeeded":
                     job.progress = {"percent": 100, "label": "已完成", "detail": ""}
                 elif job.status == "failed":
                     job.progress = {**job.progress, "label": "失败"}
-            if job.returncode and not job.error:
+                elif job.status == "partial":
+                    job.progress = {"percent": 100, "label": "部分完成", "detail": "请重试缺失的翻译"}
+            if job.returncode and job.status == "failed" and not job.error:
                 job.error = f"process exited with code {job.returncode}"
         except Exception as exc:
             job.status = "failed"
@@ -235,6 +256,7 @@ class JobManager:
             job.progress = {**job.progress, "label": "失败"}
             self._append_log(job, f"ERROR: {exc}")
         finally:
+            job.env_overrides.clear()
             job.finished_at = datetime.now().isoformat(timespec="seconds")
             if not job.output_dir:
                 job.output_dir = guess_output_dir(job.module, start_time)
@@ -280,13 +302,29 @@ def _latest_dir_after(base: Path, start_time: datetime) -> str | None:
 
 def cli_command_prefix() -> list[str]:
     if getattr(sys, "frozen", False):
-        root = project_root()
-        local_python = root / ".venv" / "Scripts" / "python.exe"
-        local_main = root / "main.py"
-        if local_python.exists() and local_main.exists():
-            return [str(local_python), str(local_main)]
         return [sys.executable]
-    return [sys.executable or "python", "main.py"]
+    return [sys.executable or "python", str(resource_root() / "main.py")]
+
+
+def terminate_process_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True,
+                       creationflags=hidden_process_flags(), timeout=15)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+        proc.wait(timeout=5)
 
 
 jobs = JobManager()
@@ -304,6 +342,11 @@ def update_progress_from_log(job: Job, line: str) -> None:
 
 
 def update_transcribe_progress(job: Job, line: str) -> None:
+    model_match = re.search(r"model download percent=([0-9.]+)", line)
+    if model_match:
+        percent = min(100.0, float(model_match.group(1)))
+        job.progress = {"percent": 40, "label": "下载语音模型", "detail": f"{percent:.0f}%", "stage_percent": percent}
+        return
     download_match = re.search(r"\[download\]\s+([0-9]+(?:\.[0-9]+)?)%", line)
     if download_match:
         downloaded = max(0.0, min(100.0, float(download_match.group(1))))
@@ -359,7 +402,7 @@ def update_analyze_progress(job: Job, line: str) -> None:
         job.progress = {**job.progress, "label": "等待 Gemini 返回"}
         return
 
-    process_match = re.search(r"(?:process|skip cached)\s+chunk_\d+\s+\((\d+)/(\d+)\)", line)
+    process_match = re.search(r"(?:process|skip validated cache)\s+chunk_\d+\s+\((\d+)/(\d+)\)", line)
     if process_match:
         current = int(process_match.group(1))
         total = int(process_match.group(2))
@@ -407,6 +450,7 @@ def update_pipeline_progress(job: Job, line: str) -> None:
         re.search(r"\[(\d)/6\]", line)
         or re.search(r"\[download\]\s+[0-9]+(?:\.[0-9]+)?%", line)
         or "whisper progress percent=" in line
+        or "model download percent=" in line
     ):
         before = dict(job.progress)
         update_transcribe_progress(job, line)

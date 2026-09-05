@@ -15,6 +15,7 @@ from app.analysis.schemas import (
 
 def _document() -> AnalysisDocument:
     meta = AnalysisMeta(
+        character_profile=True,
         run_id="analysis-test",
         input_file="sample.wav",
         transcript_run_id="transcript-test",

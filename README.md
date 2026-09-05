@@ -1,152 +1,117 @@
-# 多语言影音研析
+# 影音转写
 
-[![CI](https://github.com/Nanakari/live-transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/Nanakari/live-transcriber/actions/workflows/ci.yml)
+本机运行的影音处理工具：导入视频链接或本地文件，生成**原文转写、中文翻译、总结和学习笔记**。人物档案和 PotPlayer 预览按需生成。
 
-这是一个在本机运行的多语言影音处理工具。它可以读取 YouTube 等网络视频，或本地音频/视频文件，自动识别原文语言并生成：
+语音识别使用 faster-whisper，在本机运行。翻译、总结和学习笔记使用 Gemini，会将转写文本发送至 Gemini。没有 API Key 也可以仅转写。
 
-- 带时间轴的原文转写稿
-- 自然中文翻译与中文字幕
-- 基于音频证据的人物 Profile（Markdown）
-- 过滤闲聊后的重要要点和一段式全文概括
-- 完整学习笔记、词汇、语法与固定表达
-- 人工复查清单
-- PotPlayer 媒体预览包
+## 下载运行（Windows）
 
-默认使用 faster-whisper 进行语音识别、Gemini 进行翻译和内容分析。支持日语、英语、中文、韩语、法语、德语、西班牙语及 Whisper 能识别的其他语言，也支持自动语言检测。
+1. 在 [Releases](https://github.com/Nanakari/live-transcriber/releases) 下载 `LiveTranscriber-版本-windows-x64.zip`，完整解压。
+2. 双击 `start.bat`，浏览器将打开本机页面，默认地址为 `http://127.0.0.1:7860`。
+3. 在“设置”中填写自己的 Gemini API Key；或先点击“仅转写”。
+4. 导入文件或链接，点击“开始处理”，在结果页阅读或导出。
 
-## 快速启动
+发行包包含 Python 运行时、ffmpeg、yt-dlp 和 Node.js；保留整个文件夹及 `_internal` 子目录。GitHub 自动提供的 **Source code ZIP 是源码，不是可执行程序包**。如果尚无 Release，请使用下方源码安装。
 
-双击 `start.bat`，或运行：
+Windows 发行包以 CPU 为兼容基线，不包含 CUDA 运行库或语音模型。首次转写需要联网下载模型并留出足够磁盘空间；页面显示下载阶段，失败后可重新开始。缓存完整后，仅转写可以离线使用。高质量模型在 CPU 上可能较慢，首次使用建议选择“快速”。
+
+## 源码安装（Windows）
+
+需要 Python 3.10–3.12，推荐 Python 3.12。安装 Python 时启用 Python Launcher。
 
 ```powershell
-python main.py web --open-browser
+git clone https://github.com/Nanakari/live-transcriber.git
+cd live-transcriber
+powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1
+.\start.bat
 ```
 
-默认地址为 `http://127.0.0.1:7860`。页面中的 Gemini API Key 仅保存在当前浏览器的本地存储中；也可在项目根目录的 `secrets.local.env` 中配置：
+安装脚本会创建 `.venv`、安装约束版本的依赖，并从 imageio-ffmpeg wheel 准备 ffmpeg；不会覆盖已有的 `tools/ffmpeg.exe`。
+
+需要 NVIDIA 加速时，先安装兼容的 NVIDIA 驱动，再执行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1 -Gpu
+```
+
+自动模式优先尝试可用 GPU，失败后会明确提示并改用 CPU；“仅 GPU”模式保留错误，不自动切换。视频站点的验证可能需要 Node.js、代理或登录 cookies，可在设置中配置。源码模式可安装 Node.js 22 LTS；发行包自带 Node.js。
+
+使用已存在的 Python 安装创建环境：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1 -Python "C:\Python312\python.exe"
+```
+
+Linux/macOS 可安装 `requirements.txt` 并通过 CLI 运行，ffmpeg 和 JavaScript 运行时需自行准备；当前正式发行包和桌面集成以 Windows 为目标。
+
+## 简洁的处理流程
+
+- 首页只有一个媒体入口，默认生成四类核心结果；源语言默认自动识别。
+- “更多选项”可开启人物档案、设置网络视频的开始/结束时间。
+- 结果通过“转写 / 翻译 / 总结 / 学习笔记”切换阅读，通过“导出”下载 SRT、Markdown、JSON 或 ZIP。
+- 历史任务的“更多操作”支持重新分析、重试失败分段、生成人物档案、生成或播放 PotPlayer 预览。安装 PotPlayer 不是核心处理的前提。
+- 密钥默认保留在当前标签页；勾选“在此浏览器记住密钥”后保存在该浏览器本地存储。不要在公共电脑上记住密钥。
+- 部分翻译失败会显示“部分完成”，占位字幕明确标记“翻译暂缺”，已有结果保留以便重试。
+
+## 数据、模型与更新
+
+Windows 发行版默认数据目录：`%LOCALAPPDATA%\LiveTranscriber`。源码版默认使用项目目录。设置中的“环境与诊断”显示实际数据和模型缓存位置。
 
 ```text
-GEMINI_API_KEY=你的密钥
+数据目录/
+  config.local.yaml       可选的本机配置覆盖
+  secrets.local.env       可选的 GEMINI_API_KEY=... 配置
+  models/                 模型缓存（可用 HF_HOME 覆盖）
+  outputs/media/媒体任务/
+    audio/                源媒体副本与中间音频
+    transcripts/          原始稿、清理稿、原文字幕
+    analysis/             每次分析的独立结果
+    previews/             可选预览包
+    thumbnails/
+    logs/
 ```
 
-## 完整处理
+使用 `LIVE_TRANSCRIBER_HOME` 可以指定独立数据目录。程序更新时替换发行文件夹即可，用户数据不在发行目录里。旧版项目中的结果不会自动移动；可设置该环境变量指向旧项目目录继续读取，但请先检查旧配置中的代理和设备设置。
 
-网页中的“完整处理”会按顺序执行：
+公共配置 `config.yaml` 的代理为空；个人配置放进 `config.local.yaml`，不要提交密钥、cookies、媒体、输出或模型。Windows 包使用内置默认值和数据目录中的覆盖配置。
 
-1. 语音转写
-2. 翻译与学习分析（同时生成人物 Profile）
-3. 媒体预览
+可在 `features` 中配置 `summary`、`study_notes` 和 `character_profile`；网页默认请求完整核心结果，CLI 可按下列选项覆盖。人物档案开关参与提示词、缓存和导出，关闭时不会请求该部分内容。
 
-命令行示例：
+## 命令行
 
 ```powershell
-python main.py pipeline --input "D:\media\example.mp4" --language auto --resume
+# 默认转写、翻译、总结和学习笔记，不生成预览
+.\.venv\Scripts\python.exe main.py pipeline --input "D:\media\sample.mp4" --resume
+
+# 仅转写，不需要 Gemini Key
+.\.venv\Scripts\python.exe main.py transcribe --input "D:\media\sample.wav" --device cpu
+
+# 使用已有转写稿，按需增加人物档案
+.\.venv\Scripts\python.exe main.py analyze --input "转写稿路径.json" --character-profile --resume
+
+# 显式选择完整流程，包括预览
+.\.venv\Scripts\python.exe main.py pipeline --url "视频链接" --modules transcribe,analyze,preview
 ```
 
-处理网络视频：
+`--resume` 当前复用**相同分析参数下成功的分段缓存**，不会跳过一次新 pipeline 的下载或转写。要继续已有任务，请从历史任务重新分析，或直接使用 `analyze`。改变人物档案选项会使用独立缓存并重新分析。
+
+CLI 分析退出码：`0` 成功，`1` 失败，`2` 部分完成。源语言支持自动检测与 Whisper 语言代码；翻译和学习资料的目标语言目前为中文。
+
+## 开发、构建与发布
 
 ```powershell
-python main.py pipeline --url "https://www.youtube.com/watch?v=..." --language auto --resume
+powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1 -Dev
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m compileall -q app scripts main.py
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Version 0.2.0
 ```
 
-## 单项处理
+构建需要 Node.js。脚本校验本机 Node.js 与官方 Windows x64 校验和，收集工具与许可证，用 PyInstaller 文件夹模式打包，再在隔离数据目录和最小 PATH 下检查 Web、静态资源、Whisper 导入、yt-dlp、ffmpeg 和 Node.js。通过后生成 ZIP 和 SHA-256 校验文件。
 
-仅转写：
+CI 覆盖 Windows / Ubuntu 和 Python 3.10 / 3.12。推送 `v*` 标签会触发 Windows 构建并创建 **草稿 Release**，检查附件和说明后再发布；手动触发 workflow 只上传构建附件。本地生成文件不等于已经发布到 GitHub。
 
-```powershell
-python main.py transcribe --input "audio.wav" --language auto --quality high
-```
-
-已知语言时可用标准语言代码覆盖自动检测，例如 `--language ja`、`--language en` 或 `--language zh`。
-
-对已有转写稿执行翻译与学习分析：
-
-```powershell
-python main.py analyze --input "outputs\media\任务目录\transcripts\任务_transcript.json" --profile multilingual_study --resume
-```
-
-分析完成后，同一个分析目录会包含：
-
-```text
-character_profile.md  人物性格、喜好、习惯与表达方式档案
-video_summary.md      重要要点与全文概括
-study_notes.md        完整学习笔记
-bilingual.md          双语稿
-translation_zh.srt    中文字幕
-vocabulary.md         词汇表
-grammar.md            语法与固定表达
-review.md             人工复查清单
-analysis.json         完整结构化分析结果
-```
-
-人物 Profile 是翻译与学习分析的一部分，不需要单独运行。它只根据音频中的直接表达和行为证据，整理人物性格表现、喜好与兴趣、价值取向、习惯、沟通风格、社交方式和身份线索，并为每条观察附上依据、时间范围与置信度；不做心理诊断或敏感属性推断。
-
-## 默认配置
-
-主要设置位于 `config.yaml`：
-
-```yaml
-transcribe:
-  language: "auto"
-  quality: "high"
-
-analysis:
-  provider: "gemini"
-  model: "gemini-3.1-flash-lite"
-  target_language: "zh"
-  profile: "multilingual_study"
-```
-
-公共配置不启用代理。需要本机代理或其他覆盖项时，将
-`config.local.example.yaml` 复制为 `config.local.yaml` 后修改；该文件不会被 Git
-跟踪。
-
-日语任务仍可使用 `dictionaries/vtuber_terms.txt` 作为默认术语提示；其他语言不会自动加载这份日语词表。
-
-## 输出目录
-
-每个媒体任务独立保存在：
-
-```text
-outputs/media/<任务名称>/
-  audio/
-  transcripts/
-  analysis/
-  previews/
-  thumbnails/
-  logs/
-```
-
-所有文件都保存在本机。AI 翻译与分析属于初稿，专有名词、反话、多人重叠、口音、方言及疑似 ASR 错误应结合 `review.md` 人工复核。
-
-## 环境要求
-
-- Python 3.10+
-- ffmpeg（项目自带 `tools/ffmpeg.exe` 时会优先使用）
-- faster-whisper
-- yt-dlp
-- Gemini API Key（运行翻译与学习分析时需要）
-
-安装依赖：
-
-```powershell
-pip install -r requirements.txt
-```
-
-如遇问题，可在网页展开“实时详细日志”，或查看对应任务目录和 `outputs/web_jobs/` 下的日志。
-
-## 开发与验证
-
-开发依赖和检查命令：
-
-```powershell
-python -m pip install -r requirements-dev.txt
-python -m pytest -q
-python -m compileall -q app main.py
-```
-
-提交改动前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题和敏感信息处理方式见
-[SECURITY.md](SECURITY.md)。
+当前 Web 服务只允许本机监听，不包含远程文件上传、多用户鉴权或服务器部署能力。更多开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 
-本仓库目前尚未授予开源许可证。除非另有明确说明，否则公开可见不代表允许复制、修改或分发。
+项目代码使用 [MIT](LICENSE) 许可证。依赖和工具保留各自的许可证，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。AI 转写和分析结果建议结合原音频与复查清单使用。

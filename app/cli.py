@@ -17,13 +17,14 @@ from .audio_processor import convert_to_clean_wav
 from .cleaner import clean_segments
 from .config import load_config, project_root, resource_root
 from .downloader import download_audio, download_thumbnail
+from .media_assets import default_thumbnail_path
 from .exporters.json_exporter import export_json
 from .exporters.markdown_exporter import export_markdown
 from .exporters.srt_exporter import export_srt
 from .preview import PreviewOptions, create_potplayer_preview
 from .schemas import TranscriptDocument, TranscriptMeta
 from .transcriber import transcribe_audio
-from .output_layout import ensure_media_subdirs, media_group_dir, group_name_from_stem
+from .output_layout import ensure_media_subdirs, group_dir_from_artifact_path, media_group_dir, group_name_from_stem
 from .utils import (
     AppError,
     RunLogger,
@@ -122,8 +123,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     transcribe.add_argument("--initial-prompt", help="ASR 初始提示词")
     transcribe.add_argument("--terms-file", help="术语文件路径，UTF-8")
-    transcribe.add_argument("--download-start", help="YouTube 部分下载开始时间，例如 90、1:30、00:01:30；默认从开头")
-    transcribe.add_argument("--download-end", help="YouTube 部分下载结束时间，例如 180、3:00、00:03:00；默认到结尾")
+    transcribe.add_argument("--download-start", help="YouTube 部分下载开始时间，例如 90、1:30、5：2：3；默认从开头")
+    transcribe.add_argument("--download-end", help="YouTube 部分下载结束时间，例如 180、3:00、6：0：0；默认到结尾")
     transcribe.add_argument("--proxy", help="传给 yt-dlp 的代理地址，例如 http://127.0.0.1:7890")
     transcribe.add_argument("--cookies-from-browser", help="让 yt-dlp 读取浏览器 cookies，例如 edge、chrome、firefox")
     transcribe.add_argument("--cookies", help="Netscape cookies.txt 文件路径")
@@ -138,6 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--source-language", default=None, help="源语言，默认从 transcript.json meta 读取")
     analyze.add_argument("--target-language", default=None, help="目标语言，默认 zh")
     analyze.add_argument("--model", default=None, help="Gemini 模型名称")
+    analyze.add_argument("--fallback-model", default=None, help="主模型不可用或配额不足时使用的 Gemini 备用模型")
     analyze.add_argument("--chunk-minutes", type=float, default=None, help="每个 chunk 覆盖的分钟数")
     analyze.add_argument("--max-segments-per-chunk", type=int, default=None, help="每个 chunk 最大 segment 数")
     analyze.add_argument("--limit-chunks", type=int, default=None, help="只处理前 N 个 chunk")
@@ -159,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline = subparsers.add_parser("pipeline", help="按选择顺序执行转写、分析、预览")
     pipeline.add_argument("--url", help="YouTube 直播回放或普通视频 URL")
     pipeline.add_argument("--input", help="本地音频或视频文件")
-    pipeline.add_argument("--modules", default="transcribe,analyze,preview", help="逗号分隔：transcribe,analyze,preview")
+    pipeline.add_argument("--modules", default="transcribe,analyze", help="逗号分隔：transcribe,analyze,preview；默认不生成预览")
     pipeline.add_argument("--transcript", help="跳过转写时使用的 transcript.json")
     pipeline.add_argument("--audio", help="跳过转写时用于预览的音频")
     pipeline.add_argument("--subtitle", help="跳过分析时用于预览的 translation_zh.srt")
@@ -170,8 +172,8 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--compute-type", choices=["int8_float16", "float16", "int8"], help="CTranslate2 compute_type")
     pipeline.add_argument("--language", default=None, help="识别语言，默认 auto 自动检测；也可指定语言代码")
     pipeline.add_argument("--beam-size", type=int, help="beam size")
-    pipeline.add_argument("--download-start", help="YouTube 部分下载开始时间，例如 90、1:30、00:01:30；默认从开头")
-    pipeline.add_argument("--download-end", help="YouTube 部分下载结束时间，例如 180、3:00、00:03:00；默认到结尾")
+    pipeline.add_argument("--download-start", help="YouTube 部分下载开始时间，例如 90、1:30、5：2：3；默认从开头")
+    pipeline.add_argument("--download-end", help="YouTube 部分下载结束时间，例如 180、3:00、6：0：0；默认到结尾")
     pipeline.add_argument("--proxy", help="传给 yt-dlp 的代理地址")
     pipeline.add_argument("--cookies-from-browser", help="让 yt-dlp 读取浏览器 cookies")
     pipeline.add_argument("--cookies", help="Netscape cookies.txt 文件路径")
@@ -181,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--provider", default=None, choices=["gemini", "local"], help="LLM provider")
     pipeline.add_argument("--profile", default=None, help="分析 profile")
     pipeline.add_argument("--analysis-model", default=None, help="Gemini 模型名称")
+    pipeline.add_argument("--analysis-fallback-model", default=None, help="Gemini 备用模型名称")
     pipeline.add_argument("--limit-chunks", type=int, default=None, help="只处理前 N 个 chunk")
     pipeline.add_argument("--resume", action="store_true", help="跳过已成功处理的 chunk")
     pipeline.add_argument("--resolution", default="1280x720", help="预览视频分辨率")
@@ -191,6 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--port", type=int, default=7860, help="监听端口，默认 7860")
     web.add_argument("--open-browser", action="store_true", help="启动后打开浏览器")
     web.add_argument("--no-browser", action="store_true", help="启动后不打开浏览器，便于自动化自检")
+    for command_parser in (analyze, pipeline):
+        for feature in ("character-profile", "summary", "study-notes"):
+            command_parser.add_argument(f"--{feature}", action=argparse.BooleanOptionalAction, default=None)
     return parser
 
 
@@ -204,7 +210,7 @@ def _resolve_options(args: argparse.Namespace, config: dict[str, Any]) -> dict[s
     if language.strip() == "":
         raise AppError("language 参数不能为空。")
 
-    device = args.device or profile.get("preferred_device") or config["transcribe"]["device"]
+    device = args.device or ("cpu" if quality == "cpu_safe" else config["transcribe"]["device"])
     if args.compute_type:
         compute_type = args.compute_type
     elif args.device == "cuda":
@@ -235,7 +241,7 @@ def _resolve_options(args: argparse.Namespace, config: dict[str, Any]) -> dict[s
     return options
 
 
-def handle_transcribe(args: argparse.Namespace) -> int:
+def transcribe_task(args: argparse.Namespace) -> dict[str, Path]:
     if not args.url and not args.input:
         raise AppError("请至少提供 --url 或 --input。")
 
@@ -369,7 +375,11 @@ def handle_transcribe(args: argparse.Namespace) -> int:
         logger=logger,
     )
 
-    keep_clean_audio = args.keep_temp or not bool(
+    defer_temp_cleanup = bool(getattr(args, "defer_temp_cleanup", False))
+    keep_clean_audio = args.keep_temp or defer_temp_cleanup or not bool(
+        config.get("audio", {}).get("delete_clean_wav_after_transcribe", True)
+    )
+    record_clean_audio = args.keep_temp or not bool(
         config.get("audio", {}).get("delete_clean_wav_after_transcribe", True)
     )
     meta = TranscriptMeta(
@@ -377,7 +387,7 @@ def handle_transcribe(args: argparse.Namespace) -> int:
         source_url=source_url,
         input_file=input_file,
         source_audio_file=str(source_audio),
-        clean_audio_file=str(clean_audio) if keep_clean_audio else "",
+        clean_audio_file=str(clean_audio) if record_clean_audio else "",
         download_start=args.download_start or "",
         download_end=args.download_end or "",
         language=options["language"],
@@ -420,10 +430,17 @@ def handle_transcribe(args: argparse.Namespace) -> int:
 
     _print("\n完成：")
     completed_paths = [source_audio, raw_json, transcript_json, transcript_srt, transcript_md, media_log_file]
-    if keep_clean_audio and clean_audio.exists():
+    if keep_clean_audio and not defer_temp_cleanup and clean_audio.exists():
         completed_paths.insert(1, clean_audio)
     for path in completed_paths:
         _print(f"- {path}")
+    result = {"transcript": transcript_json, "audio": source_audio, "output_dir": group_dir}
+    print("ARTIFACT_RESULT " + json.dumps({key: str(value) for key, value in result.items()}), flush=True)
+    return result
+
+
+def handle_transcribe(args: argparse.Namespace) -> int:
+    transcribe_task(args)
     return 0
 
 
@@ -442,17 +459,21 @@ def cleanup_empty_staging(staging_dir: Path) -> None:
         current = current.parent
 
 
-def handle_analyze(args: argparse.Namespace) -> int:
+def analyze_task(args: argparse.Namespace) -> dict[str, Any]:
     config = load_config()
     analysis_config = config.get("analysis", {})
     input_file = Path(args.input).expanduser()
     options = AnalyzeOptions(
+        **{name: getattr(args, name, None) if getattr(args, name, None) is not None
+           else config.get("features", {}).get(name, name != "character_profile")
+           for name in ("character_profile", "summary", "study_notes")},
         input_file=input_file,
         provider=args.provider or analysis_config.get("provider", "gemini"),
         profile=args.profile or analysis_config.get("profile", "multilingual_study"),
         source_language=args.source_language or analysis_config.get("source_language", ""),
         target_language=args.target_language or analysis_config.get("target_language", "zh"),
-        model=args.model or analysis_config.get("model", "gemini-3.1-flash-lite"),
+        model=args.model or analysis_config.get("model", "gemini-3.5-flash-lite"),
+        fallback_model=args.fallback_model or analysis_config.get("fallback_model", "gemini-3.1-flash-lite"),
         api_key_env=analysis_config.get("api_key_env", "GEMINI_API_KEY"),
         chunk_minutes=float(args.chunk_minutes or analysis_config.get("chunk_minutes", 3)),
         max_segments_per_chunk=int(args.max_segments_per_chunk or analysis_config.get("max_segments_per_chunk", 40)),
@@ -474,12 +495,39 @@ def handle_analyze(args: argparse.Namespace) -> int:
     if result.get("dry_run"):
         _print(f"- preview: {result['dry_run_file']}")
     else:
+        fallback_lines = result["document"].meta.fallback_lines
+        if fallback_lines:
+            _print(
+                f"- 警告：{fallback_lines} 条字幕自动补译后仍缺少中文翻译；"
+                "已用带标记的原文占位，时间轴保持完整。"
+            )
         for path in result.get("output_paths", {}).values():
             _print(f"- {path}")
-    return 0
+    result["exit_code"] = 0
+    if not result.get("dry_run"):
+        meta = result["document"].meta
+        total_lines = sum(len(chunk.bilingual_lines) for chunk in result["document"].chunks)
+        if not total_lines or meta.fallback_lines == total_lines:
+            result["exit_code"] = 1
+        elif meta.failed_chunks or meta.fallback_lines:
+            result["exit_code"] = 2
+        print("ANALYSIS_STATUS " + json.dumps({"failed_chunks": meta.failed_chunks,
+              "fallback_lines": meta.fallback_lines, "total_lines": total_lines}), flush=True)
+    print("ARTIFACT_RESULT " + json.dumps({"output_dir": str(result["output_dir"])}), flush=True)
+    return result
+
+
+def handle_analyze(args: argparse.Namespace) -> int:
+    return analyze_task(args)["exit_code"]
 
 
 def handle_preview(args: argparse.Namespace) -> int:
+    result = _create_preview(args)
+    _print_preview_result(result)
+    return 0
+
+
+def _create_preview(args: argparse.Namespace) -> dict[str, Path]:
     options = PreviewOptions(
         audio=Path(args.audio),
         subtitle=Path(args.subtitle),
@@ -491,14 +539,17 @@ def handle_preview(args: argparse.Namespace) -> int:
         mode=args.mode,
         debug=args.debug,
     )
-    result = create_potplayer_preview(options)
+    return create_potplayer_preview(options)
+
+
+def _print_preview_result(result: dict[str, Path]) -> None:
     _print("\nPotPlayer 预览包已生成：")
     for path in result.values():
         _print(f"- {path}")
-    return 0
 
 
 def handle_pipeline(args: argparse.Namespace) -> int:
+    config = load_config()
     modules = [part.strip() for part in str(args.modules or "").split(",") if part.strip()]
     allowed = {"transcribe", "analyze", "preview"}
     unknown = [module for module in modules if module not in allowed]
@@ -510,6 +561,8 @@ def handle_pipeline(args: argparse.Namespace) -> int:
     transcript: Path | None = Path(args.transcript).expanduser() if args.transcript else None
     audio: Path | None = Path(args.audio).expanduser() if args.audio else None
     subtitle: Path | None = Path(args.subtitle).expanduser() if args.subtitle else None
+    preview_video: Path | None = None
+    exit_code = 0
 
     if "transcribe" in modules and not args.url and not args.input:
         raise AppError("模块一需要视频 URL 或本地音频/视频路径。")
@@ -544,14 +597,13 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             cookies=args.cookies,
             remote_components=args.remote_components,
             keep_temp=False,
+            defer_temp_cleanup=True,
             debug=args.debug,
         )
         _print("[pipeline] 开始模块一：转写")
-        handle_transcribe(transcribe_args)
-        transcript = _latest_transcript_after(start_time)
-        if not transcript:
-            raise AppError("模块一完成后没有找到新的 transcript.json。")
-        audio = _audio_from_transcript_meta(transcript) or audio
+        transcribed = transcribe_task(transcribe_args)
+        transcript = transcribed["transcript"]
+        audio = transcribed["audio"]
         _print(f"[pipeline] transcript={transcript}")
 
     if "analyze" in modules:
@@ -559,12 +611,14 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             raise AppError("模块二需要 transcript.json。")
         start_time = datetime.now()
         analyze_args = argparse.Namespace(
+            **{name: getattr(args, name, None) for name in ("character_profile", "summary", "study_notes")},
             input=str(transcript),
             provider=args.provider,
             profile=args.profile,
             source_language=None,
             target_language=None,
             model=args.analysis_model,
+            fallback_model=args.analysis_fallback_model,
             chunk_minutes=None,
             max_segments_per_chunk=None,
             limit_chunks=args.limit_chunks,
@@ -573,10 +627,12 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             debug=args.debug,
         )
         _print("[pipeline] 开始模块二：翻译与学习分析")
-        handle_analyze(analyze_args)
-        analysis_dir = _latest_analysis_after(start_time, transcript)
-        if not analysis_dir:
-            raise AppError("模块二完成后没有找到新的分析输出目录。")
+        analyzed = analyze_task(analyze_args)
+        exit_code = analyzed["exit_code"]
+        analysis_dir = analyzed["output_dir"]
+        if exit_code == 1:
+            _print("[pipeline] 翻译失败，已保留转写和复查资料；请配置后重试分析。")
+            return 1
         subtitle = analysis_dir / "translation_zh.srt"
         _print(f"[pipeline] analysis={analysis_dir}")
 
@@ -600,10 +656,106 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             debug=args.debug,
         )
         _print("[pipeline] 开始模块三：PotPlayer 预览")
-        handle_preview(preview_args)
+        preview_result = _create_preview(preview_args)
+        _print_preview_result(preview_result)
+        preview_video = preview_result["video"]
 
-    _print("[pipeline] 完整处理完成。")
-    return 0
+    deleted_wavs = _cleanup_generated_pipeline_wavs(transcript, audio)
+    for deleted_wav in deleted_wavs:
+        _print(f"[pipeline] 已删除中间 WAV：{deleted_wav}")
+    delete_source_m4a = bool(
+        config.get("audio", {}).get("delete_source_m4a_after_preview", True)
+    )
+    if delete_source_m4a and preview_video:
+        deleted_sources = _cleanup_pipeline_source_m4a(transcript, audio, preview_video)
+        for deleted_source in deleted_sources:
+            _print(f"[pipeline] 已删除原始 M4A：{deleted_source}")
+    _print("[pipeline] 完整处理完成。" if exit_code == 0 else "[pipeline] 部分完成，请复查缺失的翻译。")
+    return exit_code
+
+
+def _cleanup_generated_pipeline_wavs(transcript: Path | None, audio: Path | None) -> list[Path]:
+    """Delete only reproducible clean WAV intermediates after a successful pipeline."""
+    group_dir = None
+    for artifact in (transcript, audio):
+        if artifact:
+            group_dir = group_dir_from_artifact_path(artifact)
+            if group_dir:
+                break
+    if group_dir is None:
+        return []
+
+    audio_dir = group_dir / "audio"
+    if not audio_dir.exists():
+        return []
+    deleted: list[Path] = []
+    for path in audio_dir.glob("*_clean_16k.wav"):
+        try:
+            path.unlink(missing_ok=True)
+            if not path.exists():
+                deleted.append(path)
+        except OSError as exc:
+            _print(f"[pipeline] 警告：无法删除中间 WAV {path}：{exc}")
+    return deleted
+
+
+def _cleanup_pipeline_source_m4a(
+    transcript: Path | None,
+    audio: Path | None,
+    preview_video: Path,
+) -> list[Path]:
+    """Delete only the same media group's generated source M4A after preview succeeds."""
+    group_dir = None
+    for artifact in (transcript, audio, preview_video):
+        if artifact:
+            group_dir = group_dir_from_artifact_path(artifact)
+            if group_dir:
+                break
+    if group_dir is None:
+        return []
+
+    try:
+        group_dir = group_dir.resolve()
+        previews_dir = (group_dir / "previews").resolve()
+        preview_path = preview_video.resolve()
+        preview_path.relative_to(previews_dir)
+    except (OSError, ValueError):
+        return []
+    if not preview_path.is_file() or preview_path.stat().st_size <= 0:
+        return []
+
+    candidates: list[Path] = []
+    if audio:
+        candidates.append(audio)
+    if transcript and transcript.is_file():
+        try:
+            meta = json.loads(transcript.read_text(encoding="utf-8")).get("meta", {})
+            source_value = str(meta.get("source_audio_file") or "").strip()
+            if source_value:
+                candidates.append(Path(source_value))
+        except (OSError, ValueError, TypeError):
+            pass
+
+    audio_dir = (group_dir / "audio").resolve()
+    deleted: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            path = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.parent != audio_dir or not path.name.endswith("_source.m4a"):
+            continue
+        try:
+            path.unlink(missing_ok=True)
+            if not path.exists():
+                deleted.append(path)
+        except OSError as exc:
+            _print(f"[pipeline] 警告：无法删除原始 M4A {path}：{exc}")
+    return deleted
 
 
 def _latest_transcript_after(start_time: datetime) -> Path | None:
@@ -668,10 +820,12 @@ def _cover_for_artifacts(subtitle: Path, audio: Path) -> Path | None:
     for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
         candidates.extend(global_thumbs.glob(pattern))
     existing = [path for path in candidates if path.exists() and path.is_file()]
-    return max(existing, key=lambda path: path.stat().st_mtime) if existing else None
+    return max(existing, key=lambda path: path.stat().st_mtime) if existing else default_thumbnail_path()
 
 
 def handle_web(args: argparse.Namespace) -> int:
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        raise AppError("当前版本为本机应用，请使用 --host 127.0.0.1。")
     try:
         import uvicorn
     except ImportError as exc:
@@ -700,6 +854,8 @@ def handle_web(args: argparse.Namespace) -> int:
 
 
 def run() -> None:
+    project_root().mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(project_root() / "models"))
     if getattr(sys, "frozen", False) and (sys.stdout is None or sys.stderr is None):
         log_dir = Path(sys.executable).resolve().parent / "outputs"
         log_dir.mkdir(parents=True, exist_ok=True)

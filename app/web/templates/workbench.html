@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>影音转写</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/workbench.css?v=0.2.0"><script src="/static/workbench.js?v=0.2.0" defer></script></head>
+<body>
+<header class="topbar"><a class="brand" href="/">影音转写 <small>本地工作台</small></a><button id="settingsBtn" type="button" aria-expanded="false" aria-controls="settingsPanel">设置</button></header>
+<main class="shell">
+<section class="panel" id="settingsPanel" hidden aria-label="应用设置">
+<div class="section-head"><h2>设置</h2><button id="closeSettingsBtn" type="button">完成</button></div>
+<label>Gemini API Key<input id="apiKey" type="password" autocomplete="off" placeholder="用于翻译、总结和学习笔记"></label><label class="check"><input id="rememberKey" type="checkbox">在此浏览器记住密钥</label><p id="keyStatus" class="hint"></p>
+<div class="fields"><label>运行设备<select id="device"><option value="auto">自动选择 GPU / CPU</option><option value="cpu">仅 CPU</option><option value="cuda">仅 GPU（CUDA）</option></select></label><label>网络代理<input id="proxy" placeholder="留空使用默认网络连接"></label></div>
+<details><summary>模型与下载设置</summary><div class="fields"><label>Gemini 主模型<input id="analysisModel"></label><label>备用模型<input id="fallbackModel"></label></div><label>Whisper 本地模型目录<input id="asrModel" placeholder="可选；留空按质量档位下载模型"></label><p class="hint">首次转写需要下载模型，缓存后可离线转写；也可指定包含 model.bin 和 config.json 的本地目录。</p><label>cookies.txt 路径<input id="cookies" placeholder="视频需要登录时填写"></label></details>
+<details><summary>环境与诊断</summary><p id="environment" class="hint"></p><p id="dataPath" class="path"></p><p id="modelPath" class="path"></p><div class="actions"><button id="refreshStatusBtn" type="button">重新检查</button><button id="openDataBtn" type="button">打开数据目录</button><button id="shutdownBtn" class="danger" type="button">关闭服务</button></div></details>
+</section>
+<div id="notice" class="notice" role="status" hidden></div>
+<form id="taskForm" class="panel">
+<h1>导入音频或视频</h1><p class="hint">一次生成转写、中文翻译、总结和学习笔记。</p>
+<div class="tabs source-tabs" role="tablist" aria-label="媒体来源"><button type="button" id="urlTab" role="tab" aria-selected="true" aria-controls="urlPane">视频链接</button><button type="button" id="fileTab" role="tab" aria-selected="false" aria-controls="filePane">本地文件</button></div>
+<div id="urlPane" role="tabpanel" aria-labelledby="urlTab"><input id="url" type="url" aria-label="视频链接" placeholder="粘贴 YouTube 等视频链接"></div>
+<div id="filePane" role="tabpanel" aria-labelledby="fileTab" hidden><div class="picker"><input id="inputPath" aria-label="本地文件路径" placeholder="选择本机音频或视频文件"><button id="browseBtn" type="button">选择文件</button></div></div>
+<div class="fields compact-fields"><label>原文语言<select id="language"><option value="auto">自动识别</option><option value="ja">日语</option><option value="en">英语</option><option value="zh">中文</option><option value="ko">韩语</option><option value="fr">法语</option><option value="de">德语</option><option value="es">西班牙语</option></select></label><label>转写质量<select id="quality"><option value="fast">快速 · small</option><option value="accurate">均衡 · medium</option><option value="high">高质量 · large-v3-turbo</option><option value="cpu_safe">CPU 稳定 · medium</option></select></label></div>
+<details><summary>更多选项</summary><label class="check"><input id="characterProfile" type="checkbox">生成人物档案</label><div class="fields"><label>下载开始时间<input id="downloadStart" placeholder="例如 1:30，留空从开头"></label><label>下载结束时间<input id="downloadEnd" placeholder="例如 5:00，留空到结尾"></label></div><p class="hint">时间范围用于网络视频；PotPlayer 预览可在处理完成后生成。</p></details>
+<div class="submit-row"><p id="setupHint" class="hint">正在读取配置…</p><div class="actions"><button id="transcribeOnlyBtn" type="button" data-heavy>仅转写</button><button id="startBtn" class="primary" type="submit" data-heavy>开始处理</button></div></div>
+</form>
+<section id="jobPanel" class="panel" hidden aria-label="当前任务"><div class="section-head"><strong id="jobLabel">等待开始</strong><button id="stopBtn" type="button">取消任务</button></div><progress id="jobProgress" max="100" value="0" aria-label="处理进度"></progress><p id="jobDetail" class="hint" aria-live="polite"></p><p id="jobWarning" class="warning" hidden></p><details id="logDetails"><summary>查看详细日志</summary><pre id="logText"></pre></details></section>
+<section class="panel" aria-label="处理结果"><div class="section-head"><div><h2>处理结果</h2><p id="resultTitle" class="hint">处理完成后，结果会显示在这里。</p></div><details id="exportDetails" class="export-menu" hidden><summary>导出</summary><div id="exportLinks"></div></details></div>
+<nav id="resultTabs" class="tabs" role="tablist" aria-label="结果类型"></nav><article id="reader" class="reader" role="tabpanel"><p class="empty">添加媒体开始处理，或从历史任务中打开已有结果。</p></article>
+<details id="resultActions" hidden><summary>更多操作</summary><div class="actions"><button id="reanalyzeBtn" type="button" data-heavy>重新分析／重试失败部分</button><button id="addProfileBtn" type="button" data-heavy>生成人物档案</button><button id="previewBtn" type="button" data-heavy>生成 PotPlayer 预览</button><button id="playBtn" type="button" hidden>播放预览</button><button id="folderBtn" type="button">打开文件夹</button><button id="deleteBtn" type="button" class="danger" data-heavy>删除任务文件</button></div><p id="storageHint" class="hint"></p></details>
+</section>
+<details class="history" id="historyDetails"><summary>历史任务 <span id="historyCount"></span></summary><div id="historyList"></div></details>
+<footer>语音识别在本机运行；翻译与分析会将转写文本发送至 Gemini。AI 结果可结合复查清单核对。</footer>
+</main></body></html>

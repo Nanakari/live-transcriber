@@ -1,23 +1,35 @@
 ﻿from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .config import project_root
+from .config import project_root, tool_path
+from .media_assets import default_thumbnail_path
 from .utils import AppError, RunLogger, run_subprocess
 
 
 def _yt_dlp_command() -> list[str] | None:
     root = project_root()
-    local_exe = root / ".venv" / "Scripts" / "yt-dlp.exe"
-    if local_exe.exists():
-        return [str(local_exe)]
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "_yt-dlp"]
+    # Console launchers created inside a virtual environment contain an absolute
+    # Python path and stop working when the project directory is moved. Calling
+    # the module through the environment's Python keeps the project portable.
+    local_pythons = (
+        root / ".venv" / "Scripts" / "python.exe",
+        root / ".venv" / "bin" / "python",
+    )
+    for local_python in local_pythons:
+        if local_python.exists():
+            return [str(local_python), "-m", "yt_dlp"]
 
     if not getattr(sys, "frozen", False):
         try:
@@ -33,17 +45,16 @@ def _yt_dlp_command() -> list[str] | None:
 
 def _ffmpeg_location() -> str | None:
     root = project_root()
-    local = root / "tools" / "ffmpeg.exe"
-    if local.exists():
+    local = tool_path("ffmpeg")
+    if local:
         return str(local.parent)
     found = shutil.which("ffmpeg")
     return str(Path(found).parent) if found else None
 
 
 def _ffmpeg_command() -> str | None:
-    root = project_root()
-    local = root / "tools" / "ffmpeg.exe"
-    if local.exists():
+    local = tool_path("ffmpeg")
+    if local:
         return str(local)
     return shutil.which("ffmpeg")
 
@@ -84,16 +95,22 @@ def _add_cookie_options(command: list[str], cookies_from_browser: str | None, co
 
 
 def _add_remote_components(command: list[str], remote_components: str | None) -> None:
+    node = tool_path("node") or shutil.which("node")
+    if node:
+        command.extend(["--js-runtimes", f"node:{node}"])
     if remote_components:
         command.extend(["--remote-components", remote_components])
 
 class DownloadSection(NamedTuple):
     start: str
-    end: str
+    end: str | None
 
 
 def _time_to_seconds(value: str, label: str) -> float:
-    text = value.strip()
+    # NFKC converts full-width digits and Chinese/full-width colons to their
+    # ASCII equivalents. Spaces around separators are harmless as well.
+    text = unicodedata.normalize("NFKC", value).strip()
+    text = re.sub(r"\s*:\s*", ":", text)
     if not text:
         raise AppError(f"{label} 不能为空。")
     parts = text.split(":")
@@ -110,7 +127,12 @@ def _time_to_seconds(value: str, label: str) -> float:
         else:
             raise ValueError
     except ValueError as exc:
-        raise AppError(f"{label} 格式无效：{value}。请使用秒数或 HH:MM:SS，例如 90、1:30、00:01:30。") from exc
+        raise AppError(
+            f"{label} 格式无效：{value}。请使用秒数或 H:M:S；支持中英文冒号，"
+            "例如 90、1:30、5：2：3。"
+        ) from exc
+    if not math.isfinite(seconds):
+        raise AppError(f"{label} 必须是有效数字。")
     if seconds < 0:
         raise AppError(f"{label} 不能小于 0。")
     return seconds
@@ -154,8 +176,8 @@ def make_download_section(start: str | None, end: str | None, duration_seconds: 
     elif duration_seconds and duration_seconds > 0:
         end_seconds = duration_seconds
     else:
-        raise AppError("只填写下载开始时间时，未能获取视频总时长。请同时填写下载结束时间。")
-    if end_seconds <= start_seconds:
+        end_seconds = None
+    if end_seconds is not None and end_seconds <= start_seconds:
         raise AppError("下载结束时间必须大于开始时间。")
     if duration_seconds and duration_seconds > 0:
         duration_label = _format_duration_label(duration_seconds)
@@ -164,21 +186,26 @@ def make_download_section(start: str | None, end: str | None, duration_seconds: 
                 f"下载开始时间 {_format_duration_label(start_seconds)} 超过视频总时长 {duration_label}。"
                 "请确认填的是当前视频内的时间点。"
             )
-        if end_seconds > duration_seconds:
+        if end_seconds is not None and end_seconds > duration_seconds:
             raise AppError(
                 f"下载结束时间 {_format_duration_label(end_seconds)} 超过视频总时长 {duration_label}。"
                 "请把结束时间调到视频范围内。"
             )
-    return DownloadSection(start=_format_section_time(start_seconds), end=_format_section_time(end_seconds))
+    return DownloadSection(
+        start=_format_section_time(start_seconds),
+        end=_format_section_time(end_seconds) if end_seconds is not None else None,
+    )
 
 
 def _add_download_section(command: list[str], section: DownloadSection | None) -> None:
     if not section:
         return
-    command.extend(["--download-sections", f"*{section.start}-{section.end}", "--force-keyframes-at-cuts"])
+    command.extend(["--download-sections", f"*{section.start}-{section.end or 'inf'}", "--force-keyframes-at-cuts"])
 
 
-def _section_duration(section: DownloadSection) -> str:
+def _section_duration(section: DownloadSection) -> str | None:
+    if section.end is None:
+        return None
     duration = float(section.end) - float(section.start)
     if duration <= 0:
         raise AppError("下载结束时间必须大于开始时间。")
@@ -215,6 +242,32 @@ def _section_is_complete(actual_seconds: float, expected_seconds: float) -> bool
 def _output_tail(output: str, *, max_chars: int = 2000) -> str:
     text = output.strip()
     return text[-max_chars:] if len(text) > max_chars else text
+
+
+def _is_n_challenge_failure(output: str) -> bool:
+    return "n challenge solving failed" in output.lower()
+
+
+def _is_http_403_failure(output: str) -> bool:
+    return bool(re.search(r"\bhttp(?: error)? 403\b|\b403 forbidden\b", output, re.IGNORECASE))
+
+
+def _n_challenge_error(output: str) -> AppError:
+    return AppError(
+        "YouTube 下载被 JS challenge 拦截。\n"
+        "这不是转写模型错误，而是 yt-dlp 明确报告 n challenge solving failed。\n"
+        "请在高级设置里把 YouTube JS challenge solver 设为“GitHub solver”，或在命令行添加：--remote-components ejs:github。\n"
+        f"yt-dlp 输出：{output}"
+    )
+
+
+def _http_403_error(output: str, attempts: int) -> AppError:
+    return AppError(
+        f"YouTube 媒体下载返回 HTTP 403，重新提取签名 URL 后共尝试 {attempts} 次仍然失败。\n"
+        "这通常与代理出口变化、YouTube 临时风控或 PO Token 校验有关，不代表 JS challenge 一定失败。\n"
+        "请确认代理出口稳定，稍后重试；如果持续发生，再检查 Cookie 或 PO Token 配置。\n"
+        f"yt-dlp 输出：{output}"
+    )
 
 
 def _strip_start_time_query(url: str) -> str:
@@ -298,7 +351,8 @@ def _download_audio_section_with_ffmpeg(
     if not ffmpeg:
         raise AppError("未找到 ffmpeg，无法下载指定时间段。请确认 tools\\ffmpeg.exe 存在或 ffmpeg 在 PATH 中。")
 
-    expected_seconds = float(_section_duration(section))
+    duration_text = _section_duration(section)
+    expected_seconds = float(duration_text) if duration_text is not None else None
     max_attempts = 3
     last_error = ""
 
@@ -317,6 +371,8 @@ def _download_audio_section_with_ffmpeg(
         if result.returncode != 0:
             last_error = (result.stderr or result.stdout).strip()
             logger.write(f"获取音频直连失败 attempt={attempt}: {_output_tail(last_error)}")
+            if _is_n_challenge_failure(last_error):
+                raise _n_challenge_error(last_error)
         else:
             media_url = next((line.strip() for line in result.stdout.splitlines() if line.strip()), "")
             if not media_url:
@@ -331,9 +387,10 @@ def _download_audio_section_with_ffmpeg(
                 ]
                 if proxy:
                     command.extend(["-http_proxy", proxy])
+                command.extend(["-i", media_url])
+                if expected_seconds is not None:
+                    command.extend(["-t", _format_section_time(expected_seconds)])
                 command.extend([
-                    "-i", media_url,
-                    "-t", _format_section_time(expected_seconds),
                     "-progress", "pipe:1", "-nostats",
                     "-vn", "-c:a", "aac", "-b:a", "192k", str(output_path),
                 ])
@@ -349,10 +406,11 @@ def _download_audio_section_with_ffmpeg(
                     actual_seconds = _probe_media_duration(output_path, logger)
                     if actual_seconds is None:
                         last_error = "无法确认下载文件的实际时长。"
-                    elif _section_is_complete(actual_seconds, expected_seconds):
+                    elif expected_seconds is None or _section_is_complete(actual_seconds, expected_seconds):
                         logger.write(
-                            f"section download complete expected={expected_seconds:.2f}s "
-                            f"actual={actual_seconds:.2f}s"
+                            "section download complete "
+                            + (f"expected={expected_seconds:.2f}s " if expected_seconds is not None else "expected=end-of-media ")
+                            + f"actual={actual_seconds:.2f}s"
                         )
                         return
                     else:
@@ -370,11 +428,14 @@ def _download_audio_section_with_ffmpeg(
             logger.write(f"将在 {delay} 秒后重新获取直链并重试。")
             time.sleep(delay)
 
+    if _is_http_403_failure(last_error):
+        raise _http_403_error(last_error, max_attempts)
     raise AppError(
         f"指定时间段下载不完整，已重试 {max_attempts} 次。\n"
-        f"目标区间：{section.start}-{section.end}（{expected_seconds:.2f} 秒）。\n"
-        f"最后错误：{last_error}\n"
-        "请检查代理稳定性，或临时关闭代理后重试。"
+        f"目标区间：{section.start}-{section.end or '视频结尾'}"
+        + (f"（{expected_seconds:.2f} 秒）。\n" if expected_seconds is not None else "。\n")
+        + f"最后错误：{last_error}\n"
+        + "请检查代理稳定性，或临时关闭代理后重试。"
     )
 
 def download_audio(
@@ -411,7 +472,7 @@ def download_audio(
     section = make_download_section(download_start, download_end, _metadata_duration_seconds(info))
     download_url = _strip_start_time_query(url)
     if section:
-        logger.write(f"download section={section.start}-{section.end}")
+        logger.write(f"download section={section.start}-{section.end or 'end'}")
     output_stem = _build_media_stem(info, run_id)
     if section:
         section_output = audio_dir / f"{output_stem}_source.m4a"
@@ -451,8 +512,15 @@ def download_audio(
     if proxy:
         command.extend(["--proxy", proxy])
 
-    result = run_subprocess(command, logger, stream_output=True)
-    if result.returncode != 0:
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        logger.write(f"audio download attempt={attempt}/{max_attempts}")
+        # A new yt-dlp process performs extraction again, so a retry never reuses
+        # the rejected/expired signed googlevideo URL from the previous attempt.
+        result = run_subprocess(command, logger, stream_output=True)
+        if result.returncode == 0:
+            break
+
         output = (result.stderr or result.stdout).strip()
         if "Failed to decrypt with DPAPI" in output:
             raise AppError(
@@ -461,13 +529,18 @@ def download_audio(
                 "请把浏览器 Cookie 导出为 Netscape 格式的 cookies.txt，然后在高级设置里选择 cookies.txt，并把 Cookies from browser 设为“不使用”。\n"
                 f"yt-dlp 输出：{output}"
             )
-        if "n challenge solving failed" in output or "remote-components" in output or "HTTP Error 403" in output:
-            raise AppError(
-                "YouTube 下载被 JS challenge 拦截。\n"
-                "这不是转写模型错误，而是 yt-dlp 在下载视频数据时没有解出 YouTube 的 n challenge。\n"
-                "请在高级设置里把 YouTube JS challenge solver 设为“GitHub solver”，或在命令行添加：--remote-components ejs:github。\n"
-                f"yt-dlp 输出：{output}"
-            )
+        if _is_n_challenge_failure(output):
+            raise _n_challenge_error(output)
+        if _is_http_403_failure(output):
+            if attempt < max_attempts:
+                delay = attempt * 2
+                logger.write(
+                    f"YouTube 媒体请求返回 HTTP 403；将在 {delay} 秒后重新提取签名 URL "
+                    f"并重试（{attempt + 1}/{max_attempts}）。"
+                )
+                time.sleep(delay)
+                continue
+            raise _http_403_error(output, max_attempts)
         raise AppError(
             "URL 下载失败。\n"
             "可能原因：URL 不正确、视频不可访问、需要登录、网络问题、需要代理、yt-dlp 版本过旧，或 ffmpeg 不可用。\n"
@@ -492,10 +565,21 @@ def download_thumbnail(
     remote_components: str | None = None,
 ) -> Path | None:
     """Best-effort thumbnail download for preview workflows without changing audio download."""
+    thumbnails_dir.mkdir(parents=True, exist_ok=True)
+
+    def use_default(reason: str) -> Path | None:
+        source = default_thumbnail_path()
+        if not source.exists() or not source.is_file() or source.stat().st_size == 0:
+            logger.write(f"default thumbnail unavailable after {reason}: {source}")
+            return None
+        target = thumbnails_dir / f"{run_id}.png"
+        shutil.copy2(source, target)
+        logger.write(f"using default thumbnail after {reason}: {target}")
+        return target
+
     yt_dlp = _yt_dlp_command()
     if not yt_dlp:
-        raise AppError("未找到 yt-dlp，无法下载封面缩略图。请运行：python -m pip install yt-dlp")
-    thumbnails_dir.mkdir(parents=True, exist_ok=True)
+        return use_default("yt-dlp was not found")
     output_template = str(thumbnails_dir / f"{run_id}.%(ext)s")
     command = [
         *yt_dlp,
@@ -515,9 +599,12 @@ def download_thumbnail(
     result = run_subprocess(command, logger)
     if result.returncode != 0:
         logger.write("thumbnail download failed: " + (result.stderr or result.stdout))
-        return None
-    candidates = sorted(thumbnails_dir.glob(f"{run_id}.*"))
-    return candidates[0] if candidates else None
+        return use_default("thumbnail download failed")
+    candidates = sorted(
+        path for path in thumbnails_dir.glob(f"{run_id}.*")
+        if path.is_file() and path.stat().st_size > 0
+    )
+    return candidates[0] if candidates else use_default("thumbnail was missing")
 
 
 

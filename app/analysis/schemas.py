@@ -114,11 +114,15 @@ class ChunkAnalysisResult(BaseModel):
 
 
 class AnalysisMeta(BaseModel):
+    character_profile: bool = False
+    summary: bool = True
+    study_notes: bool = True
     run_id: str
     input_file: str
     transcript_run_id: str = ""
     provider: str
     model: str
+    fallback_model: str = ""
     profile: str
     source_language: str
     target_language: str
@@ -129,6 +133,8 @@ class AnalysisMeta(BaseModel):
     succeeded_chunks: int = 0
     failed_chunks: int = 0
     skipped_chunks: int = 0
+    fallback_chunks: int = 0
+    fallback_lines: int = 0
 
 
 class FailedChunk(BaseModel):

@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 
 from .jobs import jobs
 
 
 class BrowserLifecycle:
-    def __init__(self, *, stale_after_seconds: float = 12.0, shutdown_delay_seconds: float = 3.0) -> None:
-        self.stale_after_seconds = stale_after_seconds
+    def __init__(self, *, shutdown_delay_seconds: float = 3.0) -> None:
         self.shutdown_delay_seconds = shutdown_delay_seconds
-        self._clients: dict[str, float] = {}
+        self._clients: set[str] = set()
         self._lock = threading.Lock()
         self._shutdown_scheduled = False
 
@@ -19,22 +17,18 @@ class BrowserLifecycle:
         if not client_id:
             return self.status()
         with self._lock:
-            self._clients[client_id] = time.monotonic()
-            self._prune_locked()
-        self.schedule_shutdown_if_idle()
+            self._clients.add(client_id)
         return self.status()
 
     def close(self, client_id: str) -> dict[str, object]:
         with self._lock:
             if client_id:
-                self._clients.pop(client_id, None)
-            self._prune_locked()
+                self._clients.discard(client_id)
         self.schedule_shutdown_if_idle()
         return self.status()
 
     def status(self) -> dict[str, object]:
         with self._lock:
-            self._prune_locked()
             active_clients = len(self._clients)
         return {
             "active_clients": active_clients,
@@ -63,21 +57,19 @@ class BrowserLifecycle:
 
     def _shutdown_if_still_idle(self) -> None:
         should_exit = False
+        should_retry = False
         with self._lock:
-            self._prune_locked()
-            if not self._clients and not jobs.has_running_jobs():
-                should_exit = True
-            else:
+            if self._clients:
                 self._shutdown_scheduled = False
+            elif jobs.has_running_jobs():
+                self._shutdown_scheduled = False
+                should_retry = True
+            else:
+                should_exit = True
         if should_exit:
             os._exit(0)
-        self.schedule_shutdown_if_idle()
-
-    def _prune_locked(self) -> None:
-        cutoff = time.monotonic() - self.stale_after_seconds
-        stale = [client_id for client_id, last_seen in self._clients.items() if last_seen < cutoff]
-        for client_id in stale:
-            self._clients.pop(client_id, None)
+        if should_retry:
+            self.schedule_shutdown_if_idle()
 
 
 lifecycle = BrowserLifecycle()

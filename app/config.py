@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from pathlib import Path
+import os
 import sys
 from typing import Any
 
@@ -13,7 +14,7 @@ from .utils import AppError
 DEFAULT_CONFIG: dict[str, Any] = {
     "app": {"output_dir": "outputs", "timezone": "Asia/Tokyo"},
     "transcribe": {
-        "quality": "high",
+        "quality": "fast",
         "language": "auto",
         "device": "auto",
         "compute_type": "int8_float16",
@@ -35,12 +36,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "beam_size": 5,
             "vad_filter": True,
             "word_timestamps": True,
-            "preferred_device": "cuda",
             "preferred_compute_type": "int8_float16",
         },
     },
-    "audio": {"sample_rate": 16000, "channels": 1, "delete_clean_wav_after_transcribe": True},
+    "audio": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "delete_clean_wav_after_transcribe": True,
+        "delete_source_m4a_after_preview": True,
+    },
     "network": {"proxy": ""},
+    "features": {"summary": True, "study_notes": True, "character_profile": False},
     "dictionary": {"terms_path": "dictionaries/vtuber_terms.txt"},
     "cleaner": {"no_speech_prob_threshold": 0.9},
     "runtime": {
@@ -53,13 +59,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "analysis": {
         "provider": "gemini",
-        "model": "gemini-3.1-flash-lite",
+        "model": "gemini-3.5-flash-lite",
+        "fallback_model": "gemini-3.1-flash-lite",
         "api_key_env": "GEMINI_API_KEY",
         "source_language": "",
         "target_language": "zh",
         "profile": "multilingual_study",
         "chunk_minutes": 2,
-        "max_segments_per_chunk": 28,
+        "max_segments_per_chunk": 20,
         "temperature": 0.2,
         "max_retries": 6,
         "retry_backoff_seconds": 10,
@@ -72,18 +79,28 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def project_root() -> Path:
+    override = os.environ.get("LIVE_TRANSCRIBER_HOME", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     if getattr(sys, "frozen", False):
-        cwd = Path.cwd().resolve()
-        if (cwd / "config.yaml").exists():
-            return cwd
-        return Path(sys.executable).resolve().parent
+        return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LiveTranscriber"
     return Path(__file__).resolve().parents[1]
 
 
 def resource_root() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS).resolve()  # type: ignore[attr-defined]
-    return project_root()
+    return Path(__file__).resolve().parents[1]
+
+
+def tool_path(name: str) -> Path | None:
+    """Find shipped tools independently of the writable data directory."""
+    suffix = ".exe" if os.name == "nt" else ""
+    for root in (resource_root(), Path(sys.executable).resolve().parent, project_root()):
+        candidate = root / "tools" / f"{name}{suffix}"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -116,8 +133,3 @@ def load_config() -> dict[str, Any]:
         if config_path.exists():
             config = _deep_merge(config, _read_config_file(config_path))
     return config
-
-
-
-
-

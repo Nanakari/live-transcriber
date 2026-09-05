@@ -196,7 +196,7 @@ def is_cuda_available() -> bool:
             return True
     except Exception:
         pass
-    return command_exists("nvidia-smi")
+    return False
 
 
 def normalize_device_compute(
@@ -219,11 +219,9 @@ def normalize_device_compute(
         elif is_cuda_available():
             device = "cuda"
         else:
-            raise AppError(
-                "CUDA 当前不可用，已停止任务，不会自动改用 CPU。\n"
-                "请检查 NVIDIA 驱动、CUDA DLL 路径和 nvidia-cublas-cu12/nvidia-cudnn-cu12 依赖。\n"
-                "如果你明确想用 CPU，请使用 --device cpu 或 --quality cpu_safe。"
-            )
+            device = "cpu"
+            compute_type = "int8"
+            warnings.append("未检测到可用 CUDA，自动使用 CPU int8。")
 
     if device == "cpu":
         if compute_type == "int8_float16":

@@ -1,63 +1,39 @@
-﻿# -*- mode: python ; coding: utf-8 -*-
-
-import os
+# -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
 import sys
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
-python_runtime_binaries = []
-for dll_name in (
-    'expat.dll',
-    'libexpat.dll',
-    'libssl-3-x64.dll',
-    'libcrypto-3-x64.dll',
-    'ffi.dll',
-    'sqlite3.dll',
-    'libbz2.dll',
-    'liblzma.dll',
-    'zlib.dll',
-):
-    dll_path = os.path.join(sys.base_prefix, 'Library', 'bin', dll_name)
-    if os.path.exists(dll_path):
-        python_runtime_binaries.append((dll_path, '.'))
-
-a = Analysis(
-    ['main.py'],
-    pathex=[],
-    # CUDA runtime DLLs are loaded from the local .venv paths in config.yaml.
-    # Bundling every NVIDIA DLL makes the launcher multiple gigabytes large.
-    binaries=python_runtime_binaries,
-    datas=[('app\\web\\templates', 'app\\web\\templates'), ('app\\web\\static', 'app\\web\\static'), ('.venv\\Lib\\site-packages\\faster_whisper\\assets', 'faster_whisper\\assets')],
-    hiddenimports=['fastapi', 'uvicorn', 'uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.http.h11_impl', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on', 'jinja2', 'starlette', 'pydantic', 'yaml', 'rich', 'app.web.server', 'app.web.routes', 'app.web.jobs'],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
-    noarchive=False,
-    optimize=0,
-)
+root = Path(SPECPATH)
+stage = root / 'build' / 'release-assets'
+if not (stage / 'tools' / 'ffmpeg.exe').exists():
+    raise RuntimeError('Run scripts/release_assets.py before building.')
+runtime = []
+for name in ('expat.dll', 'libexpat.dll', 'libssl-3-x64.dll', 'libcrypto-3-x64.dll',
+             'ffi.dll', 'sqlite3.dll', 'libbz2.dll', 'liblzma.dll', 'zlib.dll'):
+    path = Path(sys.base_prefix) / 'Library' / 'bin' / name
+    if path.exists():
+        runtime.append((str(path), '.'))
+datas = [
+    (str(root / 'app/web/templates/workbench.html'), 'app/web/templates'),
+    (str(root / 'app/web/static/workbench.css'), 'app/web/static'),
+    (str(root / 'app/web/static/workbench.js'), 'app/web/static'),
+    (str(root / 'app/assets/neutral_cover.png'), 'app/assets'),
+    (str(root / 'dictionaries'), 'dictionaries'),
+    (str(stage / 'licenses'), 'licenses'),
+]
+datas += collect_data_files('faster_whisper')
+for package in ('faster-whisper', 'yt-dlp', 'huggingface-hub', 'tqdm', 'requests'):
+    datas += copy_metadata(package)
+hidden = ['app.web.server', 'app.web.routes', 'app.web.jobs', 'uvicorn.logging',
+          'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.http.h11_impl',
+          'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on']
+hidden += collect_submodules('yt_dlp')
+a = Analysis([str(root / 'main.py')], pathex=[str(root)],
+    binaries=runtime + [(str(stage / 'tools/ffmpeg.exe'), 'tools'), (str(stage / 'tools/node.exe'), 'tools')],
+    datas=datas, hiddenimports=hidden, excludes=['nvidia', 'torch', 'pytest', 'tkinter'],
+    noarchive=False, optimize=0)
 pyz = PYZ(a.pure)
-
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='多语言影音研析',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
-
-
-
-
-
+# A console-capable worker is essential for capturing task output. start.bat hides the UI launcher.
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='LiveTranscriber',
+          debug=False, strip=False, upx=False, console=True)
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='LiveTranscriber')

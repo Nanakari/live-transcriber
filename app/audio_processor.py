@@ -3,13 +3,13 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from .config import project_root
+from .config import project_root, tool_path
 from .utils import AppError, RunLogger, run_subprocess
 
 
 def ffmpeg_command() -> str | None:
-    bundled = project_root() / "tools" / "ffmpeg.exe"
-    if bundled.exists():
+    bundled = tool_path("ffmpeg")
+    if bundled:
         return str(bundled.resolve())
     return shutil.which("ffmpeg")
 

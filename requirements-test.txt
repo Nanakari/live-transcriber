@@ -1,12 +1,10 @@
 -c constraints.txt
-faster-whisper
-yt-dlp
-pydantic>=2.0
+pydantic
 PyYAML
 rich
-tzdata
 requests
 fastapi
 uvicorn
 jinja2
-imageio-ffmpeg
+httpx
+pytest

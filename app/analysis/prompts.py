@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 from .chunker import chunk_to_prompt_payload
-from .schemas import AnalysisChunk
+from .schemas import AnalysisChunk, AnalysisSegment
 
 
-PROMPT_VERSION = "multilingual-study-v5-character-profile"
+PROMPT_VERSION = "multilingual-study-v7-optional-features"
 
 SYSTEM_PROMPT = """你是一个多语言影音文本的中文翻译、内容分析与学习笔记助手。
 你的主任务是生成按时间对齐的双语文本：保留原文，给出自然中文翻译和偏直译版本。
@@ -94,7 +95,7 @@ JSON_SCHEMA_HINT = {
 }
 
 
-def build_chunk_prompt(
+def _build_full_chunk_prompt(
     chunk: AnalysisChunk,
     *,
     profile: str,
@@ -145,3 +146,77 @@ def build_repair_prompt(raw_text: str) -> str:
 原始输出：
 {raw_text}
 """
+
+
+def build_missing_lines_prompt(
+    chunk: AnalysisChunk,
+    segments: list[AnalysisSegment],
+    *,
+    source_language: str,
+    target_language: str,
+) -> str:
+    payload = {
+        "chunk_id": chunk.chunk_id,
+        "start": chunk.start,
+        "end": chunk.end,
+        "segments": [segment.model_dump() for segment in segments],
+    }
+    return f"""上一次翻译遗漏了部分 segments。请只补译下面列出的所有片段。
+
+source_language: {source_language}
+target_language: {target_language}
+
+要求：
+1. bilingual_lines 必须逐一覆盖输入的每个 segment_id，数量必须完全一致。
+2. 不得合并、跳过、概括或新增片段。
+3. segment_id/start/end/original 必须原样返回。
+4. translation_zh 使用自然中文；literal_zh 使用偏直译中文。
+5. 只返回合法 JSON 对象，不要返回 Markdown。
+
+返回结构：
+{{
+  "chunk_id": "{chunk.chunk_id}",
+  "start": {chunk.start},
+  "end": {chunk.end},
+  "bilingual_lines": [
+    {{
+      "segment_id": 1,
+      "start": 0.0,
+      "end": 1.0,
+      "original": "原文",
+      "translation_zh": "自然中文",
+      "literal_zh": "直译中文",
+      "brief_note": "",
+      "asr_suspect": false,
+      "asr_issue": "",
+      "confidence": 0.9
+    }}
+  ]
+}}
+
+待补译 segments：
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
+
+
+def build_chunk_prompt(chunk: AnalysisChunk, *, profile: str, source_language: str,
+                       target_language: str, character_profile: bool = False,
+                       summary: bool = True, study_notes: bool = True) -> str:
+    prompt = _build_full_chunk_prompt(chunk, profile=profile, source_language=source_language,
+                                      target_language=target_language)
+    schema = deepcopy(JSON_SCHEMA_HINT)
+    excluded: list[str] = []
+    if not character_profile:
+        schema.pop("profile_observations")
+        excluded.extend(("17.", "18.", "19."))
+    if not summary:
+        for key in ("chunk_summary_zh", "key_points_zh", "content_importance"):
+            schema.pop(key)
+        excluded.extend(("14.", "15.", "16."))
+    if not study_notes:
+        for key in ("vocabulary", "grammar", "fixed_expressions", "tone_notes", "learning_value"):
+            schema.pop(key)
+        excluded.extend(("5.", "6.", "7.", "8.", "9."))
+    prompt = prompt.replace(json.dumps(JSON_SCHEMA_HINT, ensure_ascii=False, indent=2),
+                            json.dumps(schema, ensure_ascii=False, indent=2))
+    return "\n".join(line for line in prompt.splitlines() if not line.startswith(tuple(excluded)))

@@ -4,7 +4,10 @@ import os
 import subprocess
 import shutil
 from pathlib import Path
-import winreg
+try:
+    import winreg
+except ImportError:
+    winreg = None  # type: ignore[assignment]
 
 from fastapi import HTTPException
 
@@ -188,6 +191,8 @@ def find_potplayer() -> Path | None:
 
 
 def _potplayer_paths_from_registry() -> list[Path]:
+    if winreg is None:
+        return []
     roots = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),

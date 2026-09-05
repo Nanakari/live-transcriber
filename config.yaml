@@ -3,7 +3,7 @@
   timezone: "Asia/Tokyo"
 
 transcribe:
-  quality: "high"
+  quality: "fast"
   language: "auto"
   device: "auto"
   compute_type: "int8_float16"
@@ -35,13 +35,13 @@ quality_profiles:
     beam_size: 5
     vad_filter: true
     word_timestamps: true
-    preferred_device: "cuda"
     preferred_compute_type: "int8_float16"
 
 audio:
   sample_rate: 16000
   channels: 1
   delete_clean_wav_after_transcribe: true
+  delete_source_m4a_after_preview: true
 
 network:
   # Keep shared defaults portable. Put a machine-specific proxy in
@@ -63,13 +63,14 @@ runtime:
 
 analysis:
   provider: "gemini"
-  model: "gemini-3.1-flash-lite"
+  model: "gemini-3.5-flash-lite"
+  fallback_model: "gemini-3.1-flash-lite"
   api_key_env: "GEMINI_API_KEY"
   source_language: ""
   target_language: "zh"
   profile: "multilingual_study"
   chunk_minutes: 2
-  max_segments_per_chunk: 28
+  max_segments_per_chunk: 20
   temperature: 0.2
   max_retries: 6
   retry_backoff_seconds: 10
@@ -84,5 +85,7 @@ analysis:
 
 
 
-
-
+features:
+  summary: true
+  study_notes: true
+  character_profile: false

@@ -25,6 +25,14 @@ def export_bilingual_markdown(document: AnalysisDocument, output_path: Path) -> 
         f"- Chunks：{document.meta.succeeded_chunks}/{document.meta.total_chunks}",
         "",
     ]
+    if document.meta.fallback_lines:
+        lines.extend(
+            [
+                f"> 注意：有 {document.meta.fallback_lines} 条字幕在自动补译后仍未获得中文翻译，"
+                "已保留原文并标记为“翻译暂缺”，时间轴没有留空。",
+                "",
+            ]
+        )
     for chunk in document.chunks:
         lines.extend([f"## {chunk.chunk_id} {format_srt_timestamp(chunk.start)} - {format_srt_timestamp(chunk.end)}", ""])
         if chunk.chunk_summary_zh:
@@ -184,16 +192,19 @@ def export_combined_study_markdown(document: AnalysisDocument, output_path: Path
         if chunk.chunk_summary_zh:
             lines.extend([f"**段落概括：** {chunk.chunk_summary_zh}", ""])
 
-        original_paragraphs = _paragraphs([item.original for item in chunk.bilingual_lines])
-        translation_paragraphs = _paragraphs([item.translation_zh for item in chunk.bilingual_lines])
-        if original_paragraphs:
-            lines.extend(["### 原文段落", ""])
-            for paragraph in original_paragraphs:
-                lines.extend([paragraph, ""])
-        if translation_paragraphs:
-            lines.extend(["### 自然中文", ""])
-            for paragraph in translation_paragraphs:
-                lines.extend([paragraph, ""])
+        for item in chunk.bilingual_lines:
+            if not item.original.strip() and not item.translation_zh.strip():
+                continue
+            lines.extend(
+                [
+                    f"### {format_srt_timestamp(item.start)} - {format_srt_timestamp(item.end)}",
+                    "",
+                    f"原文：{item.original}",
+                    "",
+                    f"中文：{item.translation_zh or '[翻译暂缺]'}",
+                    "",
+                ]
+            )
 
         if chunk.vocabulary:
             lines.extend(["### 词汇", ""])
@@ -399,70 +410,29 @@ def _append_profile_list(lines: list[str], title: str, values: list[str]) -> Non
     lines.append("")
 
 
-def _paragraphs(items: list[str], *, max_chars: int = 64, max_items: int = 2) -> list[str]:
-    paragraphs: list[str] = []
-    current = ""
-    current_items = 0
-    pieces = [
-        piece
-        for value in items
-        if value.strip()
-        for piece in _split_readable_pieces(value.strip(), max_chars=max_chars)
-    ]
-    for item in pieces:
-        separator = "" if not current else " "
-        would_be_too_long = len(current) + len(separator) + len(item) > max_chars
-        would_have_too_many_items = current_items >= max_items
-        if current and (would_be_too_long or would_have_too_many_items):
-            paragraphs.append(current)
-            current = item
-            current_items = 1
-        else:
-            current = f"{current}{separator}{item}"
-            current_items += 1
-    if current:
-        paragraphs.append(current)
-    return paragraphs
-
-
-def _split_readable_pieces(text: str, *, max_chars: int) -> list[str]:
-    sentences = [part.strip() for part in re.findall(r".+?(?:[。！？!?]+|$)", text) if part.strip()]
-    pieces: list[str] = []
-    for sentence in sentences:
-        remaining = sentence
-        while len(remaining) > max_chars:
-            window = remaining[: max_chars + 1]
-            split_at = max(window.rfind(mark) for mark in ("、", "，", ",", "；", ";", " "))
-            if split_at < max_chars // 2:
-                split_at = max_chars
-            else:
-                split_at += 1
-            pieces.append(remaining[:split_at].strip())
-            remaining = remaining[split_at:].strip()
-        if remaining:
-            pieces.append(remaining)
-    return pieces
-
-
 def export_all(document: AnalysisDocument, output_dir: Path) -> dict[str, Path]:
     paths = {
         "analysis_json": output_dir / "analysis.json",
         "bilingual_md": output_dir / "bilingual.md",
         "translation_srt": output_dir / "translation_zh.srt",
-        "vocabulary_md": output_dir / "vocabulary.md",
-        "grammar_md": output_dir / "grammar.md",
         "review_md": output_dir / "review.md",
-        "study_notes_md": output_dir / "study_notes.md",
-        "video_summary_md": output_dir / "video_summary.md",
-        "character_profile_md": output_dir / "character_profile.md",
     }
     export_analysis_json(document, paths["analysis_json"])
     export_bilingual_markdown(document, paths["bilingual_md"])
     export_translation_srt(document, paths["translation_srt"])
-    export_vocabulary_markdown(document, paths["vocabulary_md"])
-    export_grammar_markdown(document, paths["grammar_md"])
     export_review_markdown(document, paths["review_md"])
-    export_combined_study_markdown(document, paths["study_notes_md"])
-    export_video_summary_markdown(document, paths["video_summary_md"])
-    export_character_profile_markdown(document, paths["character_profile_md"])
+    if document.meta.study_notes:
+        for key, name, exporter in (
+            ("vocabulary_md", "vocabulary.md", export_vocabulary_markdown),
+            ("grammar_md", "grammar.md", export_grammar_markdown),
+            ("study_notes_md", "study_notes.md", export_combined_study_markdown),
+        ):
+            paths[key] = output_dir / name
+            exporter(document, paths[key])
+    if document.meta.summary:
+        paths["video_summary_md"] = output_dir / "video_summary.md"
+        export_video_summary_markdown(document, paths["video_summary_md"])
+    if document.meta.character_profile:
+        paths["character_profile_md"] = output_dir / "character_profile.md"
+        export_character_profile_markdown(document, paths["character_profile_md"])
     return paths

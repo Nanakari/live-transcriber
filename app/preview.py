@@ -6,7 +6,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import project_root
+from .config import project_root, tool_path
+from .media_assets import default_thumbnail_path
 from .output_layout import ensure_media_subdirs, group_dir_from_artifact_path
 from .utils import AppError, RunLogger, command_exists, format_srt_timestamp, generate_run_id, run_subprocess
 
@@ -37,12 +38,14 @@ def create_potplayer_preview(options: PreviewOptions) -> dict[str, Path]:
     audio = options.audio.expanduser()
     subtitle = options.subtitle.expanduser()
     cover = options.cover.expanduser() if options.cover else find_cover()
+    if cover is None or not cover.exists() or not cover.is_file():
+        cover = default_thumbnail_path()
     if not audio.exists() or not audio.is_file():
         raise AppError(f"音频文件不存在或不可读取：{audio}")
     if not subtitle.exists() or not subtitle.is_file():
         raise AppError(f"字幕文件不存在或不可读取：{subtitle}")
     if cover is None or not cover.exists() or not cover.is_file():
-        raise AppError("封面图不存在。请使用 --cover 指定 jpg/png/webp 封面图路径。")
+        raise AppError("封面图不存在，且内置默认缩略图不可用。")
 
     width, height = parse_resolution(options.resolution)
     run_id = generate_run_id()
@@ -102,8 +105,8 @@ def create_potplayer_preview(options: PreviewOptions) -> dict[str, Path]:
 def ensure_ffmpeg_for_preview() -> None:
     if command_exists("ffmpeg"):
         return
-    bundled = project_root() / "tools" / "ffmpeg.exe"
-    if bundled.exists():
+    bundled = tool_path("ffmpeg")
+    if bundled:
         os.environ["PATH"] = str(bundled.parent.resolve()) + os.pathsep + os.environ.get("PATH", "")
 
 

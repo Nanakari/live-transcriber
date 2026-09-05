@@ -15,6 +15,7 @@ config.local.yaml
 # Runtime and generated output
 output/
 outputs/
+models/
 *.log
 *.pid
 

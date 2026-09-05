@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,7 @@ def _segment_to_model(segment: Any, fallback_id: int) -> TranscriptSegment:
     start = float(getattr(segment, "start", 0.0) or 0.0)
     end = float(getattr(segment, "end", 0.0) or 0.0)
     return TranscriptSegment(
-        id=int(getattr(segment, "id", fallback_id) or fallback_id),
+        id=int(segment.id if getattr(segment, "id", None) is not None else fallback_id),
         start=start,
         end=end,
         start_text=format_timestamp(start),
@@ -44,6 +45,42 @@ def _segment_to_model(segment: Any, fallback_id: int) -> TranscriptSegment:
         no_speech_prob=getattr(segment, "no_speech_prob", None),
         words=words,
     )
+
+
+def _prepare_model(model_name: str, logger: RunLogger) -> str:
+    reference = _local_model_reference(model_name)
+    if Path(reference).is_dir():
+        return reference
+    from faster_whisper.utils import _MODELS
+    from huggingface_hub import snapshot_download
+    from tqdm.auto import tqdm
+
+    class DownloadProgress(tqdm):
+        def __init__(self, *args, **kwargs):
+            self.last_log = 0.0
+            super().__init__(*args, **kwargs)
+
+        def update(self, n=1):
+            value = super().update(n)
+            if self.total and time.monotonic() - self.last_log > 2:
+                self.last_log = time.monotonic()
+                logger.write(f"model download percent={min(100, self.n / self.total * 100):.1f} "
+                             f"completed={self.n}/{self.total} {self.unit}")
+            return value
+
+    repo_id = _MODELS.get(model_name, model_name)
+    kwargs = {"repo_id": repo_id, "allow_patterns": ["*.json", "model.bin", "vocabulary.*"]}
+    try:
+        cached = snapshot_download(**kwargs, local_files_only=True)
+        if all((Path(cached) / name).is_file() for name in ("model.bin", "config.json", "tokenizer.json")):
+            logger.write(f"使用已缓存模型：{cached}")
+            return cached
+    except Exception:
+        pass
+    logger.write(f"准备下载模型 {model_name}；较大模型需要更多磁盘空间。缓存：{os.environ.get('HF_HOME', 'Hugging Face 默认目录')}")
+    downloaded = snapshot_download(**kwargs, tqdm_class=DownloadProgress)
+    logger.write("model download percent=100 completed=ready")
+    return downloaded
 
 
 def _transcribe_once(
@@ -66,7 +103,7 @@ def _transcribe_once(
         raise AppError("未安装 faster-whisper。请运行：python -m pip install -r requirements.txt") from exc
 
     try:
-        model_reference = _local_model_reference(model_name)
+        model_reference = _prepare_model(model_name, logger)
         if model_reference != model_name:
             logger.write(f"使用完整本地模型：{model_reference}")
         else:
@@ -79,7 +116,7 @@ def _transcribe_once(
             "faster-whisper 模型加载失败。\n"
             "可能原因：模型名称错误、Hugging Face 网络不可达、模型下载失败，或 CUDA/compute_type 不兼容。\n"
             "如果使用 CUDA，请检查 nvidia-smi、CUDA DLL 路径、nvidia-cublas-cu12 和 nvidia-cudnn-cu12。\n"
-            "本程序不会在 CUDA 失败时自动改用 CPU；如需 CPU，请显式使用 --device cpu 或 --quality cpu_safe。"
+            "自动模式会尝试 CPU；仅 GPU 模式需要可用的 CUDA 运行库。"
         ) from exc
 
     transcribe_language = None if language == "auto" else language
@@ -120,7 +157,7 @@ def _transcribe_once(
         raise AppError(
             "语音识别失败。\n"
             "如果使用 CUDA，可能是 CUDA DLL 缺失、显存不足或 compute_type 不兼容。\n"
-            "本程序不会自动回退 CPU；请修复 CUDA，或显式使用 --device cpu / --quality cpu_safe。"
+            "自动模式会尝试 CPU；也可显式使用 --device cpu / --quality cpu_safe。"
         ) from exc
 
     detected_language = getattr(info, "language", "") or ""
@@ -149,7 +186,7 @@ def transcribe_audio(
     device_was_auto: bool,
     logger: RunLogger,
 ) -> tuple[list[TranscriptSegment], dict[str, Any]]:
-    """Run faster-whisper without silently falling back from CUDA to CPU."""
+    """Use CPU on an automatic GPU failure; explicit GPU requests stay strict."""
     try:
         segments, info = _transcribe_once(
             audio_path=audio_path,
@@ -165,7 +202,15 @@ def transcribe_audio(
             logger=logger,
         )
     except AppError:
-        raise
+        if not device_was_auto or device != "cuda":
+            raise
+        logger.write("自动 GPU 模式失败，正在使用 CPU int8 重试；识别可能更慢。")
+        segments, info = _transcribe_once(
+            audio_path=audio_path, model_name=model_name, device="cpu", compute_type="int8",
+            language=language, beam_size=beam_size, vad_filter=vad_filter,
+            word_timestamps=word_timestamps, condition_on_previous_text=condition_on_previous_text,
+            initial_prompt=initial_prompt, logger=logger,
+        )
 
     if language == "auto" and not info.get("detected_language"):
         logger.write("警告：自动语言检测未返回结果，语言记录为 unknown。")
