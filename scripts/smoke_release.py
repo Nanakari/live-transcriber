@@ -46,7 +46,7 @@ def main() -> None:
                 assert status["ffmpeg"] and status["yt_dlp"] and status["faster_whisper"], status
                 assert not status["gemini_api_key_detected"], "Release picked up a developer credential"
                 assert status["defaults"]["proxy"] == ""
-                for path, marker in (("/", "workbench.js"), ("/static/workbench.js", "startTask"), ("/static/workbench.css", ".shell")):
+                for path, marker in (("/", "workbench.js"), ("/?view=classic", "classic.js"), ("/static/classic.js", "renderQuickAction"), ("/static/classic.css", ".shell"), ("/static/workbench.js", "startTask"), ("/static/workbench.css", ".shell")):
                     with urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as response:
                         if path.endswith(".js"):
                             assert response.headers.get_content_type() == "application/javascript"

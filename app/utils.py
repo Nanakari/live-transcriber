@@ -61,7 +61,7 @@ def generate_run_id(now: Optional[datetime] = None) -> str:
 
 def prepare_output_paths(output_dir: Path) -> OutputPaths:
     run_id = generate_run_id()
-    staging_dir = output_dir / "media" / "_staging" / run_id
+    staging_dir = output_dir / "_staging" / run_id
     audio_dir = staging_dir / "audio"
     transcripts_dir = staging_dir / "transcripts"
     logs_dir = staging_dir / "logs"

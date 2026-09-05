@@ -34,5 +34,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          gh release view $env:GITHUB_REF_NAME --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host 'A release already exists for this tag; keeping its published assets.'
+            exit 0
+          }
           $assets = Get-ChildItem dist -File | Where-Object { $_.Extension -in '.zip', '.sha256' } | ForEach-Object FullName
           gh release create $env:GITHUB_REF_NAME --verify-tag --draft --generate-notes @assets

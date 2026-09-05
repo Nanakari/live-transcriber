@@ -55,7 +55,7 @@ Linux/macOS 可安装 `requirements.txt` 并通过 CLI 运行，ffmpeg 和 JavaS
 
 ## 数据、模型与更新
 
-Windows 发行版默认数据目录：`%LOCALAPPDATA%\LiveTranscriber`。源码版默认使用项目目录。设置中的“环境与诊断”显示实际数据和模型缓存位置。
+数据目录优先使用 `LIVE_TRANSCRIBER_HOME`。源码运行及位于本项目 `dist` 下的 EXE 共用项目目录；单独解压到其他位置的 Windows 发行包使用 `%LOCALAPPDATA%\LiveTranscriber`。设置中的“环境与诊断”显示实际数据和模型缓存位置。
 
 ```text
 数据目录/
@@ -115,3 +115,54 @@ CI 覆盖 Windows / Ubuntu 和 Python 3.10 / 3.12。推送 `v*` 标签会触发 
 ## 许可证
 
 项目代码使用 [MIT](LICENSE) 许可证。依赖和工具保留各自的许可证，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。AI 转写和分析结果建议结合原音频与复查清单使用。
+
+## 精简界面与旧版完整界面（v0.2.1）
+
+右上角“切换旧版界面”可打开旧版完整操作布局；旧版右上角可切回精简界面。浏览器记住所选布局。两种布局运行同一个新版后端，任务列表和已有结果共用，切换不取消正在运行的任务。这是界面切换，不是运行旧 EXE 或回退算法。
+
+| 功能 | 精简界面 | 旧版完整界面 |
+| --- | --- | --- |
+| 转写、中文翻译、总结、学习笔记 | 默认核心流程 | 完整流程和独立模块 |
+| 人物档案 | 更多选项／结果中补充 | 分析选项中勾选 |
+| 媒体预览／PotPlayer | 结果中的更多操作 | 独立模块，手选音频、字幕、封面和分辨率 |
+| 独立分析已有转写稿 | 从历史结果重新分析 | 可手动选择 transcript.json |
+| 检查分段、试跑 1／3 段 | 不单独展示 | 保留 |
+| Beam、计算类型、词级时间戳、浏览器 Cookies | 使用默认值或部分设置 | 保留高级参数 |
+| ZIP／单文件下载、删除历史结果 | 保留 | 使用精简界面操作 |
+| 旧版主题 | 简洁中性样式 | 保留双主题配色和布局，插画换为中性渐变 |
+
+旧版的转写、字幕、分析文件仍可被读取；缓存格式已更新，旧缓存可能需要重新分析。项目中的源码和 EXE 共用 outputs；独立发行包可用 `LIVE_TRANSCRIBER_HOME` 指向同一数据根目录。单纯切换界面不会迁移其他目录的数据。
+
+
+## 统一目录与旧文件整理
+
+两个页面只负责交互，统一调用 `app/web/routes.py`、`app/web/jobs.py` 和同一组处理模块；不会分别生成“新版结果”和“旧版结果”。
+
+```text
+outputs/
+  media/<媒体任务>/
+    audio/         音频
+    transcripts/   原文 JSON、SRT、Markdown
+    analysis/      每次分析结果、分段和诊断
+    previews/      视频预览与字幕
+    thumbnails/    媒体封面
+    logs/          该媒体的转写日志
+  cache/analysis/  共用分析缓存
+  logs/web_jobs/   网页任务日志
+  logs/maintenance/ 迁移记录
+  _staging/       尚未完成的导入及失败任务诊断
+archive/          本机旧程序、旧素材和迁移前备份（不提交 GitHub）
+dist/<版本>/      当前打包程序
+output/           开发验证截图和构建日志（不属于用户结果）
+```
+
+根目录统一使用 `start.bat`；`启动新版.bat` 是同一入口的本机快捷脚本。旧 EXE 仅供归档，正常使用请在新程序右上角切换页面。
+
+整理旧目录时，先预览，再执行；仅相同内容的冲突文件会去重，不同内容保留独立副本。更新旧 JSON 中失效的输出文件路径之前会在 archive/migration 备份。
+
+```powershell
+.\.venv\Scripts\python.exe scripts\consolidate_data.py --import-from "$env:LOCALAPPDATA\LiveTranscriber"
+.\.venv\Scripts\python.exe scripts\consolidate_data.py --import-from "$env:LOCALAPPDATA\LiveTranscriber" --apply
+```
+
+运行整理脚本前，请结束处理任务并关闭服务。不要把其他无关目录作为导入来源。

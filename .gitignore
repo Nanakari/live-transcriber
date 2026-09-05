@@ -33,3 +33,6 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local legacy archive and migration backups
+archive/

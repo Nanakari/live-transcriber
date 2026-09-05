@@ -29,7 +29,11 @@ templates = Jinja2Templates(directory=str(resource_root() / "app" / "web" / "tem
 
 @router.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "workbench.html")
+    view = request.query_params.get("view") or request.cookies.get("transcriber_view", "simple")
+    view = view if view in {"simple", "classic"} else "simple"
+    response = templates.TemplateResponse(request, "classic.html" if view == "classic" else "workbench.html")
+    response.set_cookie("transcriber_view", view, max_age=31536000, httponly=True, samesite="strict")
+    return response
 
 
 @router.get("/api/status")

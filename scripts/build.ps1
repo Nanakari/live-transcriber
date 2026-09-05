@@ -1,4 +1,4 @@
-param([string]$Version = '0.2.0', [switch]$SkipInstall)
+param([string]$Version = '0.2.1', [switch]$SkipInstall)
 $ErrorActionPreference = 'Stop'
 $projectDir = Split-Path $PSScriptRoot -Parent
 if ($Version -notmatch '^[0-9A-Za-z][0-9A-Za-z._-]*$') { throw 'Invalid version label.' }
@@ -10,9 +10,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed; build stopped.' }
     & $buildPython scripts\release_assets.py
     if ($LASTEXITCODE -ne 0) { throw 'Failed to prepare release resources.' }
-    & $buildPython -m PyInstaller --noconfirm --clean --distpath dist\release live_japanese_transcriber_web.spec
+    $versionDir = Join-Path 'dist' $Version
+    & $buildPython -m PyInstaller --noconfirm --clean --distpath $versionDir live_transcriber.spec
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
-    $releaseDir = Join-Path $projectDir 'dist\release\LiveTranscriber'
+    $releaseDir = Join-Path $projectDir "$versionDir\LiveTranscriber"
     Copy-Item -LiteralPath start.bat,README.md,LICENSE,THIRD_PARTY_NOTICES.md -Destination $releaseDir
     & $buildPython scripts\smoke_release.py $releaseDir
     if ($LASTEXITCODE -ne 0) { throw 'Release smoke checks failed; package was not created.' }

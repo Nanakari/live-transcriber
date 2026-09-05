@@ -857,7 +857,7 @@ def run() -> None:
     project_root().mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(project_root() / "models"))
     if getattr(sys, "frozen", False) and (sys.stdout is None or sys.stderr is None):
-        log_dir = Path(sys.executable).resolve().parent / "outputs"
+        log_dir = project_root() / "outputs" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         stream = (log_dir / "web_launcher.log").open("a", encoding="utf-8", buffering=1)
         if sys.stdout is None:

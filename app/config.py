@@ -83,6 +83,10 @@ def project_root() -> Path:
     if override:
         return Path(override).expanduser().resolve()
     if getattr(sys, "frozen", False):
+        # A build kept inside the source project shares its data with source runs.
+        for parent in Path(sys.executable).resolve().parents:
+            if (parent / "main.py").is_file() and (parent / "app" / "config.py").is_file():
+                return parent
         return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LiveTranscriber"
     return Path(__file__).resolve().parents[1]
 

@@ -78,7 +78,7 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
         group_dir = media_group_dir(group_name_from_stem(document.meta.run_id or options.input_file.stem))
     media_dirs = ensure_media_subdirs(group_dir)
     output_dir = media_dirs["analysis"] / analysis_run_id
-    shared_cache_dir = project_root() / "outputs" / "analysis" / "_cache"
+    shared_cache_dir = project_root() / "outputs" / "cache" / "analysis"
     chunks_dir = output_dir / "chunks"
     failed_dir = output_dir / "failed"
     output_dir.mkdir(parents=True, exist_ok=True)

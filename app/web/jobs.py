@@ -135,7 +135,7 @@ class JobManager:
                     detail="当前已有任务正在运行。请等待完成后再启动新任务。",
                 )
             job_id = generate_run_id()
-            log_dir = project_root() / "outputs" / "web_jobs"
+            log_dir = project_root() / "outputs" / "logs" / "web_jobs"
             log_dir.mkdir(parents=True, exist_ok=True)
             job = Job(
                 job_id=job_id,

@@ -114,6 +114,7 @@ def test_raw_zero_segment_id_is_preserved():
 
 
 def test_frozen_data_does_not_depend_on_install_or_cwd(monkeypatch, tmp_path):
+    monkeypatch.setattr(config.sys, "executable", str(tmp_path / "install" / "LiveTranscriber.exe"))
     monkeypatch.delenv("LIVE_TRANSCRIBER_HOME", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(config.sys, "frozen", True, raising=False)
@@ -190,3 +191,41 @@ def test_cancel_pending_task_never_spawns(monkeypatch, isolated):
     manager._run_job(job)
     assert job.status == "stopped" and job.proc is None
     assert not manager.has_running_jobs() and manager._heavy_running is None
+
+
+def test_interface_switch_persists_and_keeps_backend_jobs(isolated, monkeypatch):
+    manager = JobManager()
+    job = Job(job_id="existing", module="transcribe", command=["unused"], status="running")
+    manager._jobs[job.job_id] = job
+    monkeypatch.setattr(routes, "jobs", manager)
+    with TestClient(create_app()) as client:
+        assert 'workbench.js' in client.get('/').text
+        classic = client.get('/?view=classic')
+        assert 'classic.js' in classic.text and '切换精简界面' in classic.text
+        assert 'classic.js' in client.get('/').text
+        assert client.get('/api/jobs').json()[0]['status'] == 'running'
+        assert 'workbench.js' in client.get('/?view=simple').text
+        assert 'workbench.js' in client.get('/').text
+        assert job.status == 'running'
+
+
+def test_classic_assets_obey_content_security_policy(isolated):
+    with TestClient(create_app()) as client:
+        page = client.get('/?view=classic')
+        script = client.get('/static/classic.js')
+        assert script.status_code == 200
+        assert script.headers['content-type'].startswith('application/javascript')
+        assert "script-src 'self'" in page.headers['content-security-policy']
+        assert 'onclick=' not in script.text and '<script>' not in page.text
+        assert 'data-action=' in script.text and 'data-path=' in script.text
+        assert client.get('/static/classic.css').status_code == 200
+
+
+def test_project_build_and_source_share_data(monkeypatch, tmp_path):
+    monkeypatch.delenv('LIVE_TRANSCRIBER_HOME', raising=False)
+    (tmp_path / 'app').mkdir()
+    (tmp_path / 'app/config.py').touch()
+    (tmp_path / 'main.py').touch()
+    monkeypatch.setattr(config.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(config.sys, 'executable', str(tmp_path / 'dist/0.2.1/LiveTranscriber/LiveTranscriber.exe'))
+    assert config.project_root() == tmp_path

@@ -239,4 +239,5 @@ async function heartbeat() {
   if (!state.closing) setTimeout(heartbeat, 5000);
 }
 window.addEventListener("pagehide", () => { navigator.sendBeacon?.("/api/lifecycle/close", new Blob([JSON.stringify({client_id: clientId})], {type: "application/json"})); });
-safe(async () => { await loadStatus(true); await loadFiles(); await loadJobs(); heartbeat(); poll(); })();
+heartbeat();
+safe(async () => { await loadStatus(true); await loadFiles(); await loadJobs(); poll(); })();
