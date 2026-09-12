@@ -1,4 +1,4 @@
-param([string]$Version = '0.2.1', [switch]$SkipInstall)
+param([string]$Version = '0.2.2', [switch]$SkipInstall)
 $ErrorActionPreference = 'Stop'
 $projectDir = Split-Path $PSScriptRoot -Parent
 if ($Version -notmatch '^[0-9A-Za-z][0-9A-Za-z._-]*$') { throw 'Invalid version label.' }
@@ -8,6 +8,8 @@ try {
     $buildPython = Join-Path $projectDir '.venv\Scripts\python.exe'
     & $buildPython -m pytest -q
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed; build stopped.' }
+    & node tests/test_workbench_results.js
+    if ($LASTEXITCODE -ne 0) { throw 'Workbench tests failed; build stopped.' }
     & $buildPython scripts\release_assets.py
     if ($LASTEXITCODE -ne 0) { throw 'Failed to prepare release resources.' }
     $versionDir = Join-Path 'dist' $Version

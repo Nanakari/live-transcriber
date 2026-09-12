@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="多语言影音转写、翻译、内容分析与学习资料生成。">
   <title>影音转写 · 旧版完整界面</title><link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/classic.css?v=0.2.1">
+  <link rel="stylesheet" href="/static/classic.css?v=0.2.3">
 </head>
 <body>
   <main class="shell">
@@ -60,7 +60,7 @@
           <div class="module-checks">
             <label class="check"><input name="module_transcribe" type="checkbox" checked> 语音转写</label>
             <label class="check"><input name="module_analyze" type="checkbox" checked> 翻译与研析</label>
-            <label class="check"><input name="module_preview" type="checkbox"> 媒体预览</label>
+            <label class="check"><input name="module_preview" type="checkbox" checked> 带字幕视频</label>
           </div>
           <div class="row">
             <label>原文语言
@@ -172,7 +172,7 @@
         <div>
           <span class="eyebrow">输出成果</span>
           <h2>研析资料</h2>
-          <p>按影音任务查看人物 Profile、内容总结、学习笔记、双语字幕和播放预览。</p>
+          <p>按影音任务查看精炼总结，以及合并自然翻译的学习笔记。</p>
         </div>
         <label class="artifact-select">选择视频
           <select id="artifactSetSelect"></select>
@@ -183,7 +183,7 @@
         <section class="result-card featured-result">
           <div class="result-title">
             <span class="result-icon" aria-hidden="true">♙</span>
-            <div><h3>人物 Profile 与研析资料</h3><p>人物侧写、重要要点、全文概括、词汇语法与字幕</p></div>
+            <div><h3>总结与学习笔记</h3><p>精炼视频要点与自然段落翻译</p></div>
           </div>
           <div id="analysisQuick"></div>
         </section>
@@ -192,7 +192,7 @@
           <summary>
             <span class="result-title">
               <span class="result-icon neutral" aria-hidden="true">▶</span>
-              <span><strong>媒体预览</strong><small>PotPlayer 视频与可切换外挂字幕</small></span>
+              <span><strong>媒体预览</strong><small>字幕烧录到画面，并保留可编辑外挂字幕</small></span>
             </span>
             <span class="summary-hint">展开</span>
           </summary>
@@ -209,7 +209,7 @@
         </div>
       </div>
       <article id="filePreview" class="reader">
-        <div class="empty-reader">选择上方的“人物 Profile”“内容总结”或“完整学习笔记”开始阅读。</div>
+        <div class="empty-reader">选择上方的“总结”或“学习笔记”开始阅读。</div>
       </article>
     </section>
 
@@ -286,7 +286,7 @@
 
         <section class="pane" id="previewPane">
           <form class="sub-form" id="previewForm">
-            <div class="panel-head"><div><h2>媒体预览</h2><p>把原始音频、封面和字幕整理为 PotPlayer 播放资料包。</p></div></div>
+            <div class="panel-head"><div><h2>媒体预览</h2><p>把原始音频、封面和字幕整理为带烧录字幕的 PotPlayer 播放资料包。</p></div></div>
             <label>音频 <div class="picker-row"><select name="audio" id="audioSelect"></select><button class="browse-btn" type="button" data-browse-kind="audio" data-browse-target="audioSelect">选择文件</button></div></label>
             <label>中文字幕 <div class="picker-row"><select name="subtitle" id="subtitleSelect"></select><button class="browse-btn" type="button" data-browse-kind="subtitle" data-browse-target="subtitleSelect">选择文件</button></div></label>
             <label>封面图 <div class="picker-row"><select name="cover" id="coverSelect"></select><button class="browse-btn" type="button" data-browse-kind="cover" data-browse-target="coverSelect">选择文件</button></div></label>
@@ -302,6 +302,6 @@
       <section class="status-strip" id="statusPanel"></section>
     </details>
   </main>
-  <script src="/static/classic.js?v=0.2.1"></script>
+  <script src="/static/classic.js?v=0.2.3"></script>
 </body>
 </html>

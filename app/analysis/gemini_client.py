@@ -82,6 +82,18 @@ class GeminiClient:
         message = str(last_failure) if last_failure is not None else "未知错误"
         raise AppError(f"Gemini 请求最终失败：{message}")
 
+    def activate_fallback(self, reason: str) -> bool:
+        """Switch subsequent requests to the configured fallback model."""
+        fallback = self.fallback_model.strip()
+        if not fallback or fallback == self._active_model:
+            return False
+        previous = self._active_model
+        self._active_model = fallback
+        self.logger.write(
+            f"Gemini model fallback primary={previous} fallback={fallback} reason={reason}"
+        )
+        return True
+
     def _generate_with_model(
         self,
         model: str,

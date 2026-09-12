@@ -38,6 +38,8 @@ def test_profile_request_is_absent_unless_enabled():
     assert "profile_observations" not in plain
     assert "人物侧写" not in plain
     assert '"vocabulary"' in plain and '"chunk_summary_zh"' in plain
+    assert '"grammar"' in plain and '"review_items"' in plain
+    assert '"literal_zh"' not in plain and '"brief_note"' not in plain
     assert "profile_observations" in build_chunk_prompt(chunk(), character_profile=True, **kwargs)
 
 
@@ -121,9 +123,9 @@ def test_frozen_data_does_not_depend_on_install_or_cwd(monkeypatch, tmp_path):
     assert config.project_root() == tmp_path / "LiveTranscriber"
 
 
-def test_default_pipeline_excludes_preview():
+def test_default_pipeline_includes_subtitled_preview():
     args = cli.build_parser().parse_args(["pipeline", "--input", "test.wav"])
-    assert args.modules == "transcribe,analyze"
+    assert args.modules == "transcribe,analyze,preview"
 
 
 def test_web_no_key_fails_before_start_and_transcribe_still_allowed(isolated, monkeypatch):

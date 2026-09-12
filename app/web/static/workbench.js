@@ -47,7 +47,6 @@ async function loadStatus(initial = false) {
     try { saved = JSON.parse(storageGet(localStorage, SETTINGS) || "{}"); } catch {}
     const values = {device: defaults.device || "auto", proxy: defaults.proxy || "", language: defaults.language || "auto", quality: defaults.quality || "fast", analysisModel: status.gemini_model, fallbackModel: status.gemini_fallback_model, ...saved};
     fields.forEach(id => { if (values[id] != null) $(id).value = values[id]; });
-    $("characterProfile").checked = Boolean(defaults.features?.character_profile);
     const remembered = storageGet(localStorage, KEY);
     $("apiKey").value = storageGet(sessionStorage, KEY) || remembered || "";
     $("rememberKey").checked = Boolean(remembered);
@@ -66,7 +65,7 @@ function selectSource(source) {
   }
 }
 function taskOptions() {
-  return {gemini_api_key: $("apiKey").value.trim(), analysis_model: $("analysisModel").value.trim(), analysis_fallback_model: $("fallbackModel").value.trim(), device: $("device").value, proxy: $("proxy").value.trim(), cookies: $("cookies").value.trim(), language: $("language").value, quality: $("quality").value, model: $("asrModel").value.trim(), character_profile: $("characterProfile").checked, summary: true, study_notes: true, resume: true};
+  return {gemini_api_key: $("apiKey").value.trim(), analysis_model: $("analysisModel").value.trim(), analysis_fallback_model: $("fallbackModel").value.trim(), device: $("device").value, proxy: $("proxy").value.trim(), cookies: $("cookies").value.trim(), language: $("language").value, quality: $("quality").value, model: $("asrModel").value.trim(), character_profile: false, summary: true, study_notes: true, resume: true};
 }
 function setRunning(running) {
   state.running = running;
@@ -89,7 +88,7 @@ async function startTask(transcribeOnly = false) {
   const input = state.source === "file" ? $("inputPath").value.trim() : "";
   const url = state.source === "url" ? $("url").value.trim() : "";
   if (!input && !url) throw new Error("请先输入视频链接或选择本地文件。");
-  await startJob("/api/pipeline", {...taskOptions(), input, url, module_transcribe: true, module_analyze: !transcribeOnly, module_preview: false, download_start: $("downloadStart").value.trim(), download_end: $("downloadEnd").value.trim()});
+  await startJob("/api/pipeline", {...taskOptions(), input, url, module_transcribe: true, module_analyze: !transcribeOnly, module_preview: !transcribeOnly, download_start: $("downloadStart").value.trim(), download_end: $("downloadEnd").value.trim()});
 }
 const statusNames = {pending: "等待中", running: "处理中", stopping: "正在取消", stopped: "已取消", succeeded: "已完成", partial: "部分完成", failed: "失败"};
 async function loadJobs() {
@@ -104,7 +103,9 @@ async function loadJobs() {
   const job = jobs.find(job => job.job_id === state.activeJob) || jobs[0];
   if (job) {
     $("jobPanel").hidden = false;
-    $("jobLabel").textContent = `${statusNames[job.status] || job.status} · ${job.progress?.label || ""}`;
+    const statusLabel = statusNames[job.status] || job.status;
+    const progressLabel = job.progress?.label || "";
+    $("jobLabel").textContent = progressLabel && progressLabel !== statusLabel ? `${statusLabel} · ${progressLabel}` : statusLabel;
     $("jobProgress").value = Math.min(100, Math.max(0, Number(job.progress?.percent || 0)));
     const elapsed = Math.round((job.elapsed_seconds || 0) / 60);
     $("jobDetail").textContent = [job.progress?.detail, elapsed ? `已用时 ${elapsed} 分钟` : "", job.analysis_status?.fallback_lines ? `${job.analysis_status.fallback_lines} 条翻译待补全` : ""].filter(Boolean).join(" · ");
@@ -139,7 +140,7 @@ function renderHistory() {
 }
 function resultViews(item) {
   const files = item.analysis?.files || {};
-  return [{key: "transcript", label: "转写", path: item.transcript?.path?.replace(/\.json$/i, ".md")}, {key: "translation", label: "翻译", path: files["bilingual.md"]?.path}, {key: "summary", label: "总结", path: files["video_summary.md"]?.path}, {key: "study", label: "学习笔记", path: files["study_notes.md"]?.path}, {key: "profile", label: "人物档案", path: files["character_profile.md"]?.path}].filter(view => view.path);
+  return [{key: "transcript", label: "转写", path: item.transcript?.path?.replace(/\.json$/i, ".md")}, {key: "summary", label: "总结", path: files["video_summary.md"]?.path}, {key: "study", label: "学习笔记", path: files["study_notes.md"]?.path}].filter(view => view.path);
 }
 async function renderResults() {
   const item = selected();
@@ -157,6 +158,7 @@ async function renderResults() {
   renderExports(item); updateActions();
   const view = views.find(view => view.key === state.tab);
   if (view) { $("reader").setAttribute("aria-labelledby", `result-tab-${view.key}`); await readDocument(view.path); }
+  else { state.readerRequest++; $("reader").removeAttribute("aria-labelledby"); $("reader").replaceChildren(node("p", "此任务暂无可阅读的结果。", "empty")); }
 }
 async function readDocument(path) {
   const request = ++state.readerRequest;
@@ -175,30 +177,33 @@ async function readDocument(path) {
 }
 function renderExports(item) {
   const links = $("exportLinks"); links.replaceChildren();
-  const all = node("a", "全部文档（ZIP）"); all.href = `/api/artifacts/${encodeURIComponent(item.run_id)}/export`; links.append(all);
-  const files = {...item.analysis?.files};
-  if (item.transcript) { files["原文字幕.srt"] = {path: item.transcript.path.replace(/\.json$/i, ".srt")}; files["转写数据.json"] = item.transcript; }
-  const labels = {"translation_zh.srt": "中文字幕（SRT）", "bilingual.md": "双语稿", "video_summary.md": "总结", "study_notes.md": "学习笔记", "character_profile.md": "人物档案", "review.md": "复查清单", "analysis.json": "分析数据（JSON）"};
-  for (const [name, file] of Object.entries(files)) {
-    if (!file || name.endsWith(".log")) continue;
-    const link = node("a", labels[name] || name); link.href = `/api/download?path=${encodeURIComponent(file.path)}`; links.append(link);
+  const files = item.analysis?.files || {};
+  if (item.transcript?.path) {
+    for (const [extension, label] of [["md", "原文转写（Markdown）"], ["srt", "原文字幕（SRT）"], ["json", "转写数据（JSON）"]]) {
+      const link = node("a", label); link.href = `/api/download?path=${encodeURIComponent(item.transcript.path.replace(/\.json$/i, `.${extension}`))}`; links.append(link);
+    }
   }
+  for (const [name, label] of [["video_summary.md", "总结"], ["study_notes.md", "学习笔记"]]) {
+    const file = files[name];
+    if (!file) continue;
+    const link = node("a", label); link.href = `/api/download?path=${encodeURIComponent(file.path)}`; links.append(link);
+  }
+  const video = item.preview?.files?.["live_preview.mp4"];
+  if (video) { const link = node("a", "带字幕视频"); link.href = `/api/download?path=${encodeURIComponent(video.path)}`; links.append(link); }
 }
 function updateActions() {
   const item = selected(); if (!item) return;
   $("reanalyzeBtn").disabled = state.running || !item.transcript;
-  $("addProfileBtn").disabled = state.running || !item.transcript;
-  $("addProfileBtn").hidden = Boolean(item.analysis?.files?.["character_profile.md"]);
   $("previewBtn").disabled = state.running || !(item.audio || item.clean_audio) || !item.analysis?.files?.["translation_zh.srt"];
   $("deleteBtn").disabled = state.running || !item.deletable;
   $("playBtn").hidden = !item.preview?.files?.["live_preview.mp4"];
-  $("storageHint").textContent = `文件占用约 ${((item.storage_bytes || 0) / 1024 / 1024).toFixed(1)} MB。重新分析会复用相同参数下成功的分段；人物档案采用独立缓存。`;
+  $("storageHint").textContent = `文件占用约 ${((item.storage_bytes || 0) / 1024 / 1024).toFixed(1)} MB。重新分析会复用相同参数下成功的分段。`;
 }
-async function reanalyze(profile = null) {
+async function reanalyze() {
   const item = selected(); if (!item?.transcript) return;
   if (!hasKey()) { settings(true); throw new Error("请先填写 Gemini API Key。"); }
   const options = taskOptions();
-  await startJob("/api/analyze", {...options, input: item.transcript.path, model: options.analysis_model, fallback_model: options.analysis_fallback_model, character_profile: profile ?? Boolean(item.analysis?.files?.["character_profile.md"])});
+  await startJob("/api/analyze", {...options, input: item.transcript.path, model: options.analysis_model, fallback_model: options.analysis_fallback_model, character_profile: false});
 }
 $("settingsBtn").addEventListener("click", () => settings($("settingsPanel").hidden));
 $("closeSettingsBtn").addEventListener("click", () => { saveSettings(); settings(false); });
@@ -214,9 +219,8 @@ $("refreshStatusBtn").addEventListener("click", safe(() => loadStatus()));
 $("openDataBtn").addEventListener("click", safe(() => post("/api/open-folder", {path: state.status.data_dir})));
 $("folderBtn").addEventListener("click", safe(() => post("/api/open-folder", {path: selected()?.group_path || selected()?.transcript?.path})));
 $("reanalyzeBtn").addEventListener("click", safe(() => reanalyze()));
-$("addProfileBtn").addEventListener("click", safe(() => reanalyze(true)));
 $("previewBtn").addEventListener("click", safe(async () => { const item = selected(); await startJob("/api/preview", {audio: (item.audio || item.clean_audio).path, subtitle: item.analysis.files["translation_zh.srt"].path, artifact_run_id: item.run_id}); }));
-$("playBtn").addEventListener("click", safe(() => { const files = selected().preview.files; return post("/api/open-potplayer", {video: files["live_preview.mp4"].path, subtitle: (files["live_preview.bilingual.srt"] || files["live_preview.zh.srt"])?.path}); }));
+$("playBtn").addEventListener("click", safe(() => { const files = selected().preview.files; return post("/api/open-potplayer", {video: files["live_preview.mp4"].path}); }));
 $("deleteBtn").addEventListener("click", safe(async () => {
   const item = selected();
   if (!item || !confirm(`删除“${item.label}”的处理结果、缓存音频和预览文件？原始输入文件不会删除。`)) return;

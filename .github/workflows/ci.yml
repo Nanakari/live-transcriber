@@ -31,5 +31,10 @@ jobs:
         run: python -m pip install -r requirements-test.txt
       - name: Run tests
         run: python -m pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check workbench results
+        run: node tests/test_workbench_results.js
       - name: Compile Python sources
         run: python -m compileall -q app main.py

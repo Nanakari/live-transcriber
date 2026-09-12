@@ -37,9 +37,9 @@ class AnalysisChunk(BaseModel):
 
 class BilingualLine(_StringCoerceModel):
     segment_id: int
-    start: float
-    end: float
-    original: str
+    start: float = 0.0
+    end: float = 0.0
+    original: str = ""
     translation_zh: str
     literal_zh: str = ""
     brief_note: str = ""
@@ -143,7 +143,25 @@ class FailedChunk(BaseModel):
     raw_response_file: str = ""
 
 
+class VideoSummaryPoint(BaseModel):
+    text: str = Field(min_length=1)
+    source_chunk_ids: list[str] = Field(min_length=1)
+
+    @field_validator("text")
+    @classmethod
+    def nonblank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("summary text must not be blank")
+        return value.strip()
+
+
+class VideoSummary(BaseModel):
+    points: list[VideoSummaryPoint] = Field(min_length=1)
+
+
 class AnalysisDocument(BaseModel):
     meta: AnalysisMeta
     chunks: list[ChunkAnalysisResult] = Field(default_factory=list)
     failed_chunks: list[FailedChunk] = Field(default_factory=list)
+    video_summary: VideoSummary | None = None
+    video_summary_error: str = ""

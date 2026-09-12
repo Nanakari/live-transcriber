@@ -41,7 +41,6 @@ audio:
   sample_rate: 16000
   channels: 1
   delete_clean_wav_after_transcribe: true
-  delete_source_m4a_after_preview: true
 
 network:
   # Keep shared defaults portable. Put a machine-specific proxy in
@@ -69,10 +68,11 @@ analysis:
   source_language: ""
   target_language: "zh"
   profile: "multilingual_study"
-  chunk_minutes: 2
-  max_segments_per_chunk: 20
+  chunk_minutes: 3
+  max_segments_per_chunk: 36
   temperature: 0.2
   max_retries: 6
+  invalid_json_retries: 3
   retry_backoff_seconds: 10
   request_timeout_seconds: 300
   request_interval_seconds: 6

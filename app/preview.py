@@ -3,6 +3,7 @@
 import shutil
 import os
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,14 @@ from .config import project_root, tool_path
 from .media_assets import default_thumbnail_path
 from .output_layout import ensure_media_subdirs, group_dir_from_artifact_path
 from .utils import AppError, RunLogger, command_exists, format_srt_timestamp, generate_run_id, run_subprocess
+
+
+SUBTITLE_FORCE_STYLE = (
+    "FontName=Microsoft YaHei,FontSize=26,Bold=1,"
+    "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+    "BackColour=&H80000000,BorderStyle=3,Outline=1,Shadow=0,"
+    "Alignment=2,MarginV=36"
+)
 
 
 @dataclass
@@ -68,30 +77,27 @@ def create_potplayer_preview(options: PreviewOptions) -> dict[str, Path]:
 
     prepare_cover(cover, cover_path, logger)
     shutil.copy2(subtitle, subtitle_path)
+    ja_subtitle = maybe_copy_original_subtitle(subtitle, output_dir)
+    bilingual_subtitle = maybe_write_bilingual_subtitle(subtitle_path, ja_subtitle, output_dir)
+    study_subtitle = maybe_write_study_subtitle(subtitle, ja_subtitle, output_dir)
+    burn_subtitle = bilingual_subtitle or subtitle_path
     build_preview_video(
         audio=audio,
         cover=cover_path,
+        subtitle=burn_subtitle,
         output=video_path,
         width=width,
         height=height,
         logger=logger,
     )
-    ja_subtitle = maybe_copy_original_subtitle(subtitle, output_dir)
-    bilingual_subtitle = maybe_write_bilingual_subtitle(subtitle_path, ja_subtitle, output_dir)
-    study_subtitle = maybe_write_study_subtitle(subtitle, ja_subtitle, output_dir)
-    if bilingual_subtitle:
-        shutil.copy2(bilingual_subtitle, auto_subtitle_path)
-    elif study_subtitle:
-        shutil.copy2(study_subtitle, auto_subtitle_path)
-    else:
-        shutil.copy2(subtitle_path, auto_subtitle_path)
+    # Only remove the legacy auto-loaded subtitle after the burned video succeeds.
+    auto_subtitle_path.unlink(missing_ok=True)
     learning_notes = copy_learning_notes(subtitle, output_dir)
     write_readme(readme_path, video_path.name, subtitle_path.name, learning_notes, study_subtitle)
     return {
         "output_dir": output_dir,
         "video": video_path,
         "subtitle": subtitle_path,
-        "auto_subtitle": auto_subtitle_path,
         "bilingual_subtitle": bilingual_subtitle,
         "study_subtitle": study_subtitle,
         "vocabulary": learning_notes.get("vocabulary.md"),
@@ -155,14 +161,17 @@ def build_preview_video(
     *,
     audio: Path,
     cover: Path,
+    subtitle: Path,
     output: Path,
     width: int,
     height: int,
     logger: RunLogger,
 ) -> None:
+    subtitle_filter = build_burn_subtitle_filter(subtitle)
     vf = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+        f"{subtitle_filter},"
         "format=yuv420p,setparams=range=tv"
     )
     command = [
@@ -176,6 +185,10 @@ def build_preview_video(
         str(cover),
         "-i",
         str(audio),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
         "-vf",
         vf,
         "-c:v",
@@ -188,14 +201,27 @@ def build_preview_video(
         "aac",
         "-b:a",
         "192k",
-        "-shortest",
-        "-movflags",
-        "+faststart",
-        "-progress",
-        "pipe:1",
-        "-nostats",
-        str(output),
     ]
+    audio_duration = probe_media_duration(audio, logger)
+    if audio_duration is None or audio_duration <= 0:
+        raise AppError(
+            "无法读取原始音频时长，已停止生成预览，避免生成被截短的视频。"
+        )
+    # The subtitle timeline normally ends at the last spoken line, while the
+    # audio may contain trailing silence. Use the audio duration explicitly;
+    # never use -shortest here because the burned subtitle filter can finish
+    # before the audio does.
+    command.extend(["-t", f"{audio_duration:.3f}"])
+    command.extend(
+        [
+            "-movflags",
+            "+faststart",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            str(output),
+        ]
+    )
     result = run_subprocess(command, logger, stream_output=True)
     if result.returncode != 0:
         raise AppError(
@@ -204,6 +230,71 @@ def build_preview_video(
         )
     if not output.exists() or output.stat().st_size == 0:
         raise AppError("ffmpeg 已结束，但 live_preview.mp4 没有生成或为空。")
+    validate_preview_video(output, audio_duration, logger)
+
+
+def build_burn_subtitle_filter(subtitle: Path) -> str:
+    """Build a libass filter that burns readable subtitles into the video."""
+    subtitle_path = escape_filter_path(subtitle)
+    return f"subtitles=filename={subtitle_path}:force_style='{SUBTITLE_FORCE_STYLE}'"
+
+
+def escape_filter_path(path: Path) -> str:
+    """Escape a Windows/Unicode path for ffmpeg's filtergraph parser."""
+    value = path.expanduser().resolve().as_posix()
+    # Escape the option value first, then the surrounding filtergraph. Avoid
+    # quoted strings: an apostrophe inside them terminates ffmpeg's quoting.
+    value = re.sub(r"([\\':])", r"\\\1", value)
+    return re.sub(r"([\\'\[\],;\s])", r"\\\1", value)
+
+
+def probe_media_duration(path: Path, logger: RunLogger) -> float | None:
+    """Read media duration without decoding the whole input."""
+    text = probe_media_text(path, logger)
+    match = re.search(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)", text)
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def probe_media_text(path: Path, logger: RunLogger) -> str:
+    result = run_subprocess(
+        ["ffmpeg", "-hide_banner", "-i", str(path), "-t", "0", "-f", "null", os.devnull],
+        logger,
+    )
+    return "\n".join(part for part in (result.stderr, result.stdout) if part)
+
+
+def validate_preview_video(path: Path, expected_duration: float, logger: RunLogger) -> None:
+    """Fail loudly when the generated file is empty, truncated, or not media."""
+    text = probe_media_text(path, logger)
+    actual_duration = parse_media_duration(text)
+    if actual_duration is None:
+        raise AppError(f"预览成品校验失败：无法读取视频时长：{path}")
+
+    tolerance = max(1.0, expected_duration * 0.001)
+    if abs(actual_duration - expected_duration) > tolerance:
+        raise AppError(
+            "预览成品校验失败：视频时长与原始音频不一致。\n"
+            f"原始音频：{expected_duration:.3f}s；成品视频：{actual_duration:.3f}s。"
+        )
+    if not re.search(r"Stream #\d+:\d+.*Video:", text):
+        raise AppError("预览成品校验失败：MP4 中没有视频流。")
+    if not re.search(r"Stream #\d+:\d+.*Audio:", text):
+        raise AppError("预览成品校验失败：MP4 中没有音频流。")
+    logger.write(
+        f"预览成品校验通过：duration={actual_duration:.3f}s，"
+        "视频流和音频流均存在，字幕已烧录到视频画面。"
+    )
+
+
+def parse_media_duration(text: str) -> float | None:
+    match = re.search(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)", text)
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def maybe_copy_original_subtitle(chinese_subtitle: Path, output_dir: Path) -> Path | None:
@@ -512,14 +603,14 @@ def write_readme(
     extra = "\n".join(note_lines)
     if extra:
         extra += "\n"
-    content = f"""PotPlayer 预览包使用说明
+    content = f"""带字幕视频使用说明
 
 1. 用 PotPlayer 打开 {video_name}。
-2. 默认会优先加载 live_preview.bilingual.srt 双语字幕；如果没有自动加载，把它拖入 PotPlayer 窗口。
-3. 也可以在 PotPlayer 中右键 -> 字幕 -> 选择字幕，手动加载 {subtitle_name}、live_preview.study.srt 或 live_preview.bilingual.srt。
+2. 字幕已经烧录到 MP4 画面中，打开视频即可看到，不依赖播放器字幕样式。
+3. 同目录仍保留外挂字幕；需要修改字幕或切换双语版本时，可加载 {subtitle_name} 或 live_preview.bilingual.srt，但不会改变已经生成的 MP4。
 4. 如果字幕不同步，可以使用 PotPlayer 的字幕同步功能调整延迟。
 5. {subtitle_name} 是外挂字幕，可以直接用文本编辑器或字幕工具修改。
-6. live_preview.mp4 没有硬烧字幕，只包含静态封面画面和音频。
+6. live_preview.mp4 使用直播缩略图作为静态背景；没有直播缩略图时使用内置默认封面。
 7. 如果存在 live_preview.ja.srt，它是模块一原文字幕，可按需手动加载。
 {extra}预览包包含模块三播放文件，以及可直接打开的学习资料。
 """

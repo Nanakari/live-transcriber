@@ -26,6 +26,22 @@ class FakeClient:
         return json.dumps(response, ensure_ascii=False)
 
 
+class RawFakeClient:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls = 0
+        self.fallback_reasons: list[str] = []
+
+    def generate_json_text(self, prompt: str, *, system_prompt: str) -> str:
+        response = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return response
+
+    def activate_fallback(self, reason: str) -> bool:
+        self.fallback_reasons.append(reason)
+        return True
+
+
 def _chunk() -> AnalysisChunk:
     segments = [
         AnalysisSegment(
@@ -63,6 +79,7 @@ def _options(tmp_path: Path) -> AnalyzeOptions:
         max_segments_per_chunk=20,
         temperature=0.0,
         max_retries=0,
+        invalid_json_retries=3,
         retry_backoff_seconds=0,
         request_timeout_seconds=1,
         request_interval_seconds=0,
@@ -106,6 +123,40 @@ def test_missing_segments_are_requested_again_and_merged(tmp_path: Path) -> None
     assert [line.original for line in result.bilingual_lines] == ["原文1", "原文2", "原文3"]
     assert [(line.start, line.end) for line in result.bilingual_lines] == [(0, 1), (1, 2), (2, 3)]
     assert _chunk_coverage_issues(result, chunk) == []
+
+
+def test_invalid_json_is_repaired_before_chunk_is_skipped(tmp_path: Path) -> None:
+    complete = {"bilingual_lines": [_line(index, f"译文{index}") for index in range(1, 4)]}
+    client = RawFakeClient(["not-json", json.dumps(complete, ensure_ascii=False)])
+
+    result = _process_chunk(
+        client,
+        _chunk(),
+        _options(tmp_path),
+        "ja",
+        RunLogger(tmp_path / "run.log", mirror_stdout=False),
+    )
+
+    assert client.calls == 2
+    assert client.fallback_reasons == []
+    assert [line.translation_zh for line in result.bilingual_lines] == ["译文1", "译文2", "译文3"]
+
+
+def test_repeated_invalid_json_uses_fallback_only_on_last_attempt(tmp_path: Path) -> None:
+    complete = {"bilingual_lines": [_line(index, f"译文{index}") for index in range(1, 4)]}
+    client = RawFakeClient(["bad-1", "bad-2", "bad-3", json.dumps(complete, ensure_ascii=False)])
+
+    result = _process_chunk(
+        client,
+        _chunk(),
+        _options(tmp_path),
+        "ja",
+        RunLogger(tmp_path / "run.log", mirror_stdout=False),
+    )
+
+    assert client.calls == 4
+    assert len(client.fallback_reasons) == 1
+    assert [line.segment_id for line in result.bilingual_lines] == [1, 2, 3]
 
 
 def test_repeated_omissions_fall_back_to_original_without_timeline_gap(tmp_path: Path) -> None:
@@ -181,7 +232,7 @@ def test_failed_whole_chunk_still_exports_every_timeline_segment(tmp_path: Path)
     assert "[翻译暂缺] 原文3" in text
 
 
-def test_study_notes_interleave_original_and_translation(tmp_path: Path) -> None:
+def test_study_notes_are_structured_and_do_not_duplicate_translation(tmp_path: Path) -> None:
     chunk = _chunk()
     result = _fallback_chunk_result(chunk)
     result.bilingual_lines[0].translation_zh = "翻译1"
@@ -205,9 +256,12 @@ def test_study_notes_interleave_original_and_translation(tmp_path: Path) -> None
     export_combined_study_markdown(AnalysisDocument(meta=meta, chunks=[result]), output)
 
     text = output.read_text(encoding="utf-8")
-    assert text.index("原文：原文1") < text.index("中文：翻译1")
-    assert text.index("中文：翻译1") < text.index("原文：原文2")
-    assert text.index("原文：原文2") < text.index("中文：翻译2")
-    assert text.index("中文：翻译2") < text.index("原文：原文3")
-    assert "### 原文段落" not in text
-    assert "### 自然中文" not in text
+    assert text.startswith("# 学习资料")
+    assert "完整逐段原文与中文翻译请参见" in text
+    assert "## 生词" in text
+    assert "## 语法" in text
+    assert "## 人工复查清单" in text
+    assert "原文1原文2原文3" not in text
+    assert "翻译1翻译2翻译3" not in text
+    assert "**原文**" not in text
+    assert "**自然翻译**" not in text

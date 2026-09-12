@@ -112,6 +112,10 @@ def test_audio_download_retries_403_with_fresh_extraction(
     assert result == tmp_path / "un-1_source.m4a"
     assert len(calls) == 3
     assert calls[0] == calls[1] == calls[2]
+    assert downloader._AUDIO_FORMAT in calls[0]
+    assert "--fragment-retries" in calls[0]
+    assert calls[0][calls[0].index("--fragment-retries") + 1] == "2"
+    assert "--abort-on-unavailable-fragments" in calls[0]
     log = (tmp_path / "run.log").read_text(encoding="utf-8")
     assert "重新提取签名 URL" in log
 
@@ -170,3 +174,57 @@ def test_audio_download_reports_explicit_n_challenge_without_retry(
 
     assert calls == 1
     assert "n challenge solving failed" in str(exc_info.value)
+
+
+def test_post_live_403_reports_replay_processing_hint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure_audio_download_test(monkeypatch)
+    monkeypatch.setattr(
+        downloader,
+        "fetch_video_info",
+        lambda *args, **kwargs: {"live_status": "post_live"},
+    )
+    monkeypatch.setattr(
+        downloader,
+        "run_subprocess",
+        lambda command, logger, *, stream_output=False: subprocess.CompletedProcess(
+            command, 1, "HTTP Error 403: Forbidden", ""
+        ),
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        downloader.download_audio(
+            "https://www.youtube.com/watch?v=test",
+            tmp_path,
+            "run-1",
+            None,
+            RunLogger(tmp_path / "run.log"),
+        )
+
+    assert "刚结束" in str(exc_info.value)
+    assert "等待几分钟后重试" in str(exc_info.value)
+    assert "live_status=post_live" in (tmp_path / "run.log").read_text(encoding="utf-8")
+
+
+def test_audio_download_ignores_incomplete_part_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure_audio_download_test(monkeypatch)
+
+    def fake_run(command: list[str], logger: RunLogger, *, stream_output: bool = False):
+        (tmp_path / "un-1_source.m4a.part").write_bytes(b"partial")
+        return subprocess.CompletedProcess(command, 0, "downloaded", "")
+
+    monkeypatch.setattr(downloader, "run_subprocess", fake_run)
+
+    with pytest.raises(AppError) as exc_info:
+        downloader.download_audio(
+            "https://www.youtube.com/watch?v=test",
+            tmp_path,
+            "run-1",
+            None,
+            RunLogger(tmp_path / "run.log"),
+        )
+
+    assert "没有找到下载后的音频文件" in str(exc_info.value)

@@ -11,6 +11,7 @@ from app.output_layout import ensure_media_subdirs, group_dir_from_artifact_path
 from .cache import cache_key, chunk_result_path, load_cached_result, save_chunk_result, save_failed_response
 from .chunker import load_transcript, make_chunks, transcript_segments
 from .exporters import export_all
+from .summary import generate_video_summary
 from .gemini_client import GeminiClient, LLMClient, LocalLLMClient, parse_json_text
 from .prompts import (
     PROMPT_VERSION,
@@ -47,6 +48,7 @@ class AnalyzeOptions:
     max_segments_per_chunk: int
     temperature: float
     max_retries: int
+    invalid_json_retries: int
     retry_backoff_seconds: float
     request_timeout_seconds: float
     request_interval_seconds: float
@@ -185,6 +187,7 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
         fallback_lines=fallback_lines,
     )
     analysis_document = AnalysisDocument(meta=meta, chunks=results, failed_chunks=failed)
+    generate_video_summary(analysis_document, client, logger)
     output_paths = export_all(analysis_document, output_dir)
     logger.write(
         f"analysis finished success={len(chunks) - len(failed)} failed={len(failed)} skipped={skipped} "
@@ -240,13 +243,51 @@ def _process_chunk(
         summary=options.summary,
         study_notes=options.study_notes,
     )
-    raw = client.generate_json_text(prompt, system_prompt=SYSTEM_PROMPT)
-    result = _parse_chunk_result(client, raw, chunk, logger, options=options)
+    result = _request_valid_chunk_result(client, prompt, chunk, logger, options)
     return _complete_chunk_coverage(client, result, chunk, source_language, options.target_language, logger)
 
 
-def _parse_chunk_result(
+def _request_valid_chunk_result(
     client: LLMClient,
+    original_prompt: str,
+    chunk: AnalysisChunk,
+    logger: RunLogger,
+    options: AnalyzeOptions,
+) -> ChunkAnalysisResult:
+    total_attempts = max(1, options.invalid_json_retries + 1)
+    invalid_raw = ""
+    last_error: Exception | None = None
+    for attempt in range(1, total_attempts + 1):
+        if attempt == total_attempts and total_attempts > 1:
+            switch = getattr(client, "activate_fallback", None)
+            if callable(switch):
+                switch("invalid JSON after repeated repair attempts")
+        request_prompt = (
+            build_repair_prompt(invalid_raw)
+            if attempt == 2 and invalid_raw
+            else original_prompt
+        )
+        mode = "initial" if attempt == 1 else ("repair" if request_prompt != original_prompt else "regenerate")
+        logger.write(
+            f"json response attempt {chunk.chunk_id} attempt={attempt}/{total_attempts} mode={mode}"
+        )
+        raw = client.generate_json_text(request_prompt, system_prompt=SYSTEM_PROMPT)
+        try:
+            return _parse_chunk_result(raw, chunk, logger, options=options)
+        except Exception as exc:
+            last_error = exc
+            invalid_raw = getattr(exc, "raw_text", "") or raw
+            logger.write(
+                f"invalid json response {chunk.chunk_id} attempt={attempt}/{total_attempts}: {exc}"
+            )
+    wrapped = AppError(
+        f"Gemini 连续 {total_attempts} 次返回无效 JSON：{last_error or '未知格式错误'}"
+    )
+    setattr(wrapped, "raw_text", invalid_raw)
+    raise wrapped from last_error
+
+
+def _parse_chunk_result(
     raw: str,
     chunk: AnalysisChunk,
     logger: RunLogger,
@@ -254,15 +295,10 @@ def _parse_chunk_result(
 ) -> ChunkAnalysisResult:
     try:
         parsed = parse_json_text(raw)
-    except Exception:
-        logger.write(f"json parse failed for {chunk.chunk_id}, trying repair")
-        repair_raw = client.generate_json_text(build_repair_prompt(raw), system_prompt=SYSTEM_PROMPT)
-        try:
-            parsed = parse_json_text(repair_raw)
-        except Exception as exc:
-            wrapped = AppError(f"JSON 解析失败，repair 后仍不是合法 JSON：{exc}")
-            setattr(wrapped, "raw_text", repair_raw or raw)
-            raise wrapped from exc
+    except Exception as exc:
+        wrapped = AppError(f"JSON 解析失败：{exc}")
+        setattr(wrapped, "raw_text", raw)
+        raise wrapped from exc
 
     if options:
         if not options.character_profile:
@@ -309,11 +345,11 @@ def _complete_chunk_coverage(
         )
         try:
             raw = client.generate_json_text(prompt, system_prompt=SYSTEM_PROMPT)
-            supplement = _parse_chunk_result(client, raw, chunk, logger)
+            supplement = _parse_chunk_result(raw, chunk, logger)
             result = _merge_supplement(result, supplement, chunk)
         except Exception as exc:
             logger.write(f"coverage retry failed {chunk.chunk_id}: {exc}")
-            break
+            continue
 
     missing = _missing_segments(result, chunk)
     if missing:
@@ -344,12 +380,30 @@ def _canonicalize_result(result: ChunkAnalysisResult, chunk: AnalysisChunk) -> C
             }
         )
     ordered = [by_id[segment.segment_id] for segment in chunk.segments if segment.segment_id in by_id]
+    review_items = []
+    for item in result.review_items:
+        if item.segment_id is None:
+            review_items.append(item)
+            continue
+        segment = expected.get(item.segment_id)
+        if segment is None:
+            continue
+        review_items.append(
+            item.model_copy(
+                update={
+                    "start": segment.start,
+                    "end": segment.end,
+                    "original": segment.text,
+                }
+            )
+        )
     return result.model_copy(
         update={
             "chunk_id": chunk.chunk_id,
             "start": chunk.start,
             "end": chunk.end,
             "bilingual_lines": ordered,
+            "review_items": review_items,
         }
     )
 

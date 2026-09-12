@@ -298,11 +298,13 @@ def _require_analysis_key(api_key: str) -> None:
 
 @router.get("/api/download")
 def download_result(path: str = Query(...)):
-    target = resolve_allowed_path(path, must_be_text=True)
+    target = resolve_allowed_path(path)
     try:
         target.relative_to((project_root() / "outputs").resolve())
     except ValueError:
         raise HTTPException(status_code=403, detail="只能下载处理结果。")
+    if target.suffix.lower() not in {".txt", ".md", ".json", ".srt", ".log", ".yaml", ".yml", ".mp4"}:
+        raise HTTPException(status_code=403, detail="该文件类型不能下载。")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="文件不存在。")
     return FileResponse(target, filename=target.name)

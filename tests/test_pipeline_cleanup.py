@@ -64,74 +64,29 @@ def test_pipeline_cleanup_removes_only_generated_clean_wav(
     assert other_wav.exists()
 
 
-def test_pipeline_cleanup_removes_source_m4a_only_after_valid_preview(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_pipeline_preserves_source_m4a_even_with_legacy_cleanup_setting(monkeypatch, tmp_path):
     group = tmp_path / "media" / "sample"
     audio_dir = group / "audio"
-    transcripts_dir = group / "transcripts"
-    preview_dir = group / "previews" / "potplayer"
     audio_dir.mkdir(parents=True)
-    transcripts_dir.mkdir(parents=True)
-    preview_dir.mkdir(parents=True)
-    source_m4a = audio_dir / "sample_source.m4a"
-    unrelated_m4a = audio_dir / "recording.m4a"
-    transcript = transcripts_dir / "sample_transcript.json"
-    preview = preview_dir / "live_preview.mp4"
-    source_m4a.write_bytes(b"source")
-    unrelated_m4a.write_bytes(b"other")
-    transcript.write_text(
-        json.dumps({"meta": {"source_audio_file": str(source_m4a)}}),
-        encoding="utf-8",
-    )
-    preview.write_bytes(b"video")
-    monkeypatch.setattr(cli, "group_dir_from_artifact_path", lambda path: group)
-
-    deleted = cli._cleanup_pipeline_source_m4a(transcript, source_m4a, preview)
-
-    assert deleted == [source_m4a.resolve()]
-    assert not source_m4a.exists()
-    assert unrelated_m4a.exists()
-
-
-@pytest.mark.parametrize("preview_bytes", [None, b""])
-def test_pipeline_cleanup_keeps_source_m4a_without_completed_preview(
-    monkeypatch, tmp_path: Path, preview_bytes: bytes | None
-) -> None:
-    group = tmp_path / "media" / "sample"
-    audio_dir = group / "audio"
-    preview_dir = group / "previews" / "potplayer"
-    audio_dir.mkdir(parents=True)
-    preview_dir.mkdir(parents=True)
-    source_m4a = audio_dir / "sample_source.m4a"
-    preview = preview_dir / "live_preview.mp4"
-    source_m4a.write_bytes(b"source")
-    if preview_bytes is not None:
-        preview.write_bytes(preview_bytes)
-    monkeypatch.setattr(cli, "group_dir_from_artifact_path", lambda path: group)
-
-    deleted = cli._cleanup_pipeline_source_m4a(None, source_m4a, preview)
-
-    assert deleted == []
-    assert source_m4a.exists()
-
-
-def test_pipeline_cleanup_keeps_external_m4a(
-    monkeypatch, tmp_path: Path
-) -> None:
-    group = tmp_path / "media" / "sample"
-    preview_dir = group / "previews" / "potplayer"
-    preview_dir.mkdir(parents=True)
-    external_m4a = tmp_path / "external_source.m4a"
-    preview = preview_dir / "live_preview.mp4"
-    external_m4a.write_bytes(b"source")
-    preview.write_bytes(b"video")
-    monkeypatch.setattr(cli, "group_dir_from_artifact_path", lambda path: group)
-
-    deleted = cli._cleanup_pipeline_source_m4a(None, external_m4a, preview)
-
-    assert deleted == []
-    assert external_m4a.exists()
+    source = audio_dir / "sample_source.m4a"
+    clean = audio_dir / "sample_clean_16k.wav"
+    subtitle = group / "translation.srt"
+    video = group / "preview.mp4"
+    for path in (source, clean, subtitle):
+        path.write_bytes(b"test")
+    monkeypatch.setattr(cli, "load_config", lambda: {"audio": {"delete_source_m4a_after_preview": True}})
+    monkeypatch.setattr(cli, "group_dir_from_artifact_path", lambda _: group)
+    monkeypatch.setattr(cli, "_cover_for_artifacts", lambda *args: None)
+    def create_preview(args):
+        assert source.exists()
+        video.write_bytes(b"video")
+        return {"video": video}
+    monkeypatch.setattr(cli, "_create_preview", create_preview)
+    args = cli.build_parser().parse_args(["pipeline", "--modules", "preview", "--audio", str(source), "--subtitle", str(subtitle)])
+    assert cli.handle_pipeline(args) == 0
+    assert source.read_bytes() == b"test"
+    assert video.exists()
+    assert not clean.exists()
 
 
 def test_clean_segments_repairs_extreme_stretched_tail_timestamp() -> None:

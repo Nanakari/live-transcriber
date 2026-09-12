@@ -193,8 +193,7 @@ function renderQuickResults({ updatePreview = false } = {}) {
 
 function previewPreferredFile(item) {
   const analysisFiles = item.analysis?.files || {};
-  const previewFiles = item.preview?.files || {};
-  const preferred = analysisFiles["character_profile.md"] || analysisFiles["video_summary.md"] || analysisFiles["study_notes.md"] || analysisFiles["bilingual.md"] || previewFiles["live_preview.bilingual.srt"] || analysisFiles["translation_zh.srt"] || item.transcript;
+  const preferred = analysisFiles["video_summary.md"] || analysisFiles["study_notes.md"];
   if (preferred?.path) previewPath(preferred.path);
 }
 
@@ -206,31 +205,14 @@ function renderAnalysisQuick(run, item = null) {
   }
   const files = run.files || {};
   const primaryActions = [
-    ["人物 Profile", files["character_profile.md"], "primary-action"],
-    ["内容总结", files["video_summary.md"], "primary-action"],
-    ["完整学习笔记", files["study_notes.md"] || files["bilingual.md"], "primary-action"],
-    ["中文字幕", files["translation_zh.srt"], "secondary-action"],
-    ["打开分析目录", { path: run.path, action: "folder" }, "secondary-action"],
+    ["总结", files["video_summary.md"], "primary-action"],
+    ["学习笔记", files["study_notes.md"], "primary-action"],
   ];
-  const extraActions = [
-    ["双语稿", files["bilingual.md"]],
-    ["生词表", files["vocabulary.md"]],
-    ["语法笔记", files["grammar.md"]],
-    ["复查清单", files["review.md"]],
-  ].filter(([, file]) => file);
   $("analysisQuick").innerHTML = `
     <div class="result-meta"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(run.name || "")}</span></div>
     <div class="quick-actions">
       ${primaryActions.map(([label, target, cls]) => renderQuickAction(label, target, cls)).join("")}
     </div>
-    ${extraActions.length ? `
-      <details class="quick-more">
-        <summary>更多文件</summary>
-        <div class="quick-actions">
-          ${extraActions.map(([label, file]) => renderQuickAction(label, file, "secondary-action")).join("")}
-        </div>
-      </details>
-    ` : ""}
   `;
 }
 
@@ -248,7 +230,9 @@ function renderPreviewQuick(run, item = null) {
   const ja = files["live_preview.ja.srt"];
   const readme = files["README_play.txt"];
   const primaryActions = [
-    video ? ["播放预览视频", { path: video.path, subtitle: (bilingual || study || zh)?.path || "", action: "potplayer" }, "primary-action"] : null,
+    // Subtitles are burned into live_preview.mp4; do not pass an external
+    // subtitle here or PotPlayer would render a duplicate subtitle layer.
+    video ? ["播放预览视频", { path: video.path, action: "potplayer" }, "primary-action"] : null,
     [bilingual ? "查看双语字幕" : "查看中文字幕", bilingual || zh, "secondary-action"],
     ["打开预览目录", { path: run.path, action: "folder" }, "secondary-action"],
   ].filter(Boolean);

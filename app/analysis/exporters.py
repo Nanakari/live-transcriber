@@ -6,7 +6,14 @@ import re
 
 from app.utils import format_srt_timestamp
 
-from .schemas import AnalysisDocument, ChunkAnalysisResult, VocabularyItem, GrammarItem, FixedExpressionItem
+from .schemas import (
+    AnalysisDocument,
+    ChunkAnalysisResult,
+    FixedExpressionItem,
+    GrammarItem,
+    ReviewItem,
+    VocabularyItem,
+)
 
 
 def export_analysis_json(document: AnalysisDocument, output_path: Path) -> None:
@@ -15,58 +22,7 @@ def export_analysis_json(document: AnalysisDocument, output_path: Path) -> None:
 
 
 def export_bilingual_markdown(document: AnalysisDocument, output_path: Path) -> None:
-    lines = [
-        "# 双语转写与学习笔记",
-        "",
-        f"- 输入文件：{document.meta.input_file}",
-        f"- Provider：{document.meta.provider}",
-        f"- Model：{document.meta.model}",
-        f"- Profile：{document.meta.profile}",
-        f"- Chunks：{document.meta.succeeded_chunks}/{document.meta.total_chunks}",
-        "",
-    ]
-    if document.meta.fallback_lines:
-        lines.extend(
-            [
-                f"> 注意：有 {document.meta.fallback_lines} 条字幕在自动补译后仍未获得中文翻译，"
-                "已保留原文并标记为“翻译暂缺”，时间轴没有留空。",
-                "",
-            ]
-        )
-    for chunk in document.chunks:
-        lines.extend([f"## {chunk.chunk_id} {format_srt_timestamp(chunk.start)} - {format_srt_timestamp(chunk.end)}", ""])
-        if chunk.chunk_summary_zh:
-            lines.extend([f"**概括：** {chunk.chunk_summary_zh}", ""])
-        for item in chunk.bilingual_lines:
-            lines.extend(
-                [
-                    f"### {format_srt_timestamp(item.start)} - {format_srt_timestamp(item.end)}",
-                    "",
-                    f"原文：{item.original}",
-                    "",
-                    f"自然译：{item.translation_zh}",
-                    "",
-                    f"直译：{item.literal_zh}",
-                    "",
-                ]
-            )
-            if item.brief_note:
-                lines.extend([f"说明：{item.brief_note}", ""])
-            if item.asr_suspect:
-                lines.extend([f"ASR 复查：{item.asr_issue or '疑似 ASR 错误'}", ""])
-        if chunk.vocabulary:
-            lines.extend(["**词汇：**", ""])
-            for vocab in chunk.vocabulary:
-                lines.append(f"- {vocab.word}（{vocab.reading}）：{vocab.meaning_zh}")
-            lines.append("")
-        if chunk.grammar or chunk.fixed_expressions:
-            lines.extend(["**语法/表达：**", ""])
-            for grammar in chunk.grammar:
-                lines.append(f"- {grammar.pattern}：{grammar.explanation_zh}")
-            for expr in chunk.fixed_expressions:
-                lines.append(f"- {expr.expression}：{expr.meaning_zh}")
-            lines.append("")
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    _export_natural_translation_document(document, output_path, title="双语自然翻译")
 
 
 def export_translation_srt(document: AnalysisDocument, output_path: Path) -> None:
@@ -81,6 +37,56 @@ def export_translation_srt(document: AnalysisDocument, output_path: Path) -> Non
 
 
 def export_vocabulary_markdown(document: AnalysisDocument, output_path: Path) -> None:
+    lines = ["# 生词表", ""]
+    lines.extend(_vocabulary_lines(_collect_vocabulary(document)))
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def export_grammar_markdown(document: AnalysisDocument, output_path: Path) -> None:
+    grammar_items, expression_items = _collect_grammar_and_expressions(document)
+    lines = ["# 语法与固定表达", "", "## 语法", ""]
+    lines.extend(_grammar_lines(grammar_items))
+    lines.extend(["## 固定表达/口语表达", ""])
+    lines.extend(_expression_lines(expression_items))
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def export_review_markdown(document: AnalysisDocument, output_path: Path) -> None:
+    lines = ["# 人工复查清单", ""]
+    lines.extend(_review_lines(document))
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def export_combined_study_markdown(document: AnalysisDocument, output_path: Path) -> None:
+    vocabulary = _collect_vocabulary(document)
+    grammar, expressions = _collect_grammar_and_expressions(document)
+    review_lines = _review_lines(document)
+    lines = [
+        "# 学习资料",
+        "",
+        "本文件汇总本次分析提取的重点词汇、语法、固定表达和人工复查项。完整逐段原文与中文翻译请参见同目录的 `bilingual.md`。",
+        "",
+        "## 内容概览",
+        "",
+        f"- 生词：{len(vocabulary)} 条",
+        f"- 语法：{len(grammar)} 条",
+        f"- 固定表达：{len(expressions)} 条",
+        f"- 人工复查：{sum(1 for line in review_lines if line.startswith('## '))} 条",
+        "",
+        "## 生词",
+        "",
+    ]
+    lines.extend(_vocabulary_lines(vocabulary))
+    lines.extend(["## 语法", ""])
+    lines.extend(_grammar_lines(grammar))
+    lines.extend(["## 固定表达/口语表达", ""])
+    lines.extend(_expression_lines(expressions))
+    lines.extend(["## 人工复查清单", ""])
+    lines.extend(review_lines)
+    output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def _collect_vocabulary(document: AnalysisDocument) -> list[VocabularyItem]:
     seen: set[str] = set()
     items: list[VocabularyItem] = []
     for chunk in document.chunks:
@@ -89,208 +95,220 @@ def export_vocabulary_markdown(document: AnalysisDocument, output_path: Path) ->
             if key and key not in seen:
                 seen.add(key)
                 items.append(item)
-    lines = ["# 生词表", ""]
-    for item in items:
-        lines.extend(
-            [
-                f"## {item.word}",
-                "",
-                f"- 读音：{item.reading}",
-                f"- 意思：{item.meaning_zh}",
-                f"- 词性：{item.part_of_speech}",
-                f"- 等级：{item.level}",
-                f"- 例句：{item.example_original}",
-                f"- 例句译文：{item.example_zh}",
-                "",
-            ]
-        )
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return items
 
 
-def export_grammar_markdown(document: AnalysisDocument, output_path: Path) -> None:
+def _collect_grammar_and_expressions(
+    document: AnalysisDocument,
+) -> tuple[list[GrammarItem], list[FixedExpressionItem]]:
     grammar_items: list[GrammarItem] = []
     expression_items: list[FixedExpressionItem] = []
     seen_grammar: set[str] = set()
     seen_expr: set[str] = set()
     for chunk in document.chunks:
         for item in chunk.grammar:
-            if item.pattern not in seen_grammar:
-                seen_grammar.add(item.pattern)
+            key = item.pattern.strip()
+            if key and key not in seen_grammar:
+                seen_grammar.add(key)
                 grammar_items.append(item)
         for item in chunk.fixed_expressions:
-            if item.expression not in seen_expr:
-                seen_expr.add(item.expression)
+            key = item.expression.strip()
+            if key and key not in seen_expr:
+                seen_expr.add(key)
                 expression_items.append(item)
+    return grammar_items, expression_items
 
-    lines = ["# 语法与固定表达", "", "## 语法", ""]
-    for item in grammar_items:
+
+def _collect_review_items(document: AnalysisDocument) -> list[tuple[str, ReviewItem]]:
+    items: list[tuple[str, ReviewItem]] = []
+    seen: set[tuple[object, str, str]] = set()
+    for chunk in document.chunks:
+        for item in chunk.review_items:
+            key = (item.segment_id, item.reason_zh.strip(), item.original.strip())
+            if key not in seen:
+                seen.add(key)
+                items.append((chunk.chunk_id, item))
+    return items
+
+
+def _vocabulary_lines(items: list[VocabularyItem]) -> list[str]:
+    if not items:
+        return ["- 本次未提取到可靠的重点词汇。", ""]
+    lines: list[str] = []
+    for item in items:
+        lines.extend(
+            [
+                f"### {item.word}",
+                "",
+                f"- 读音：{item.reading or '未提供'}",
+                f"- 意思：{item.meaning_zh}",
+                f"- 词性：{item.part_of_speech or '未提供'}",
+                f"- 等级：{item.level}",
+                f"- 例句：{item.example_original or '未提供'}",
+                f"- 例句译文：{item.example_zh or '未提供'}",
+                "",
+            ]
+        )
+    return lines
+
+
+def _grammar_lines(items: list[GrammarItem]) -> list[str]:
+    if not items:
+        return ["- 本次未提取到可靠的重点语法。", ""]
+    lines: list[str] = []
+    for item in items:
         lines.extend(
             [
                 f"### {item.pattern}",
                 "",
                 f"- 说明：{item.explanation_zh}",
                 f"- 重要度：{item.importance}",
-                f"- 例句：{item.example_original}",
-                f"- 例句译文：{item.example_zh}",
+                f"- 例句：{item.example_original or '未提供'}",
+                f"- 例句译文：{item.example_zh or '未提供'}",
                 "",
             ]
         )
-    lines.extend(["## 固定表达/口语表达", ""])
-    for item in expression_items:
+    return lines
+
+
+def _expression_lines(items: list[FixedExpressionItem]) -> list[str]:
+    if not items:
+        return ["- 本次未提取到可靠的固定或口语表达。", ""]
+    lines: list[str] = []
+    for item in items:
         lines.extend(
             [
                 f"### {item.expression}",
                 "",
                 f"- 意思：{item.meaning_zh}",
-                f"- 用法：{item.usage_note_zh}",
-                f"- 例句：{item.example_original}",
-                f"- 例句译文：{item.example_zh}",
+                f"- 用法：{item.usage_note_zh or '未提供'}",
+                f"- 例句：{item.example_original or '未提供'}",
+                f"- 例句译文：{item.example_zh or '未提供'}",
                 "",
             ]
         )
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return lines
 
 
-def export_review_markdown(document: AnalysisDocument, output_path: Path) -> None:
-    lines = ["# 人工复查清单", ""]
-    for chunk in document.chunks:
-        for item in chunk.review_items:
-            time_text = ""
-            if item.start is not None and item.end is not None:
-                time_text = f"{format_srt_timestamp(item.start)} - {format_srt_timestamp(item.end)}"
-            lines.extend(
-                [
-                    f"## {chunk.chunk_id} {time_text}",
-                    "",
-                    f"- 原文：{item.original}",
-                    f"- 原因：{item.reason_zh}",
-                    f"- 类型：{item.risk_type}",
-                    "",
-                ]
-            )
-    for failed in document.failed_chunks:
-        lines.extend([f"## {failed.chunk_id}", "", f"- 失败：{failed.error}", f"- 原始响应：{failed.raw_response_file}", ""])
-    output_path.write_text("\n".join(lines), encoding="utf-8")
-
-
-def export_combined_study_markdown(document: AnalysisDocument, output_path: Path) -> None:
-    lines = [
-        "# 完整学习笔记",
-        "",
-        f"- 输入文件：{document.meta.input_file}",
-        f"- Model：{document.meta.model}",
-        f"- Chunks：{document.meta.succeeded_chunks}/{document.meta.total_chunks}",
-        "",
-    ]
-    for index, chunk in enumerate(document.chunks, start=1):
+def _review_lines(document: AnalysisDocument) -> list[str]:
+    lines: list[str] = []
+    for chunk_id, item in _collect_review_items(document):
+        time_text = ""
+        if item.start is not None and item.end is not None:
+            time_text = f"{format_srt_timestamp(item.start)} - {format_srt_timestamp(item.end)}"
         lines.extend(
             [
-                f"## 第 {index} 段 {format_srt_timestamp(chunk.start)} - {format_srt_timestamp(chunk.end)}",
+                f"## {chunk_id} {time_text}".rstrip(),
+                "",
+                f"- 原文：{item.original or '未提供'}",
+                f"- 原因：{item.reason_zh}",
+                f"- 类型：{item.risk_type or '未分类'}",
                 "",
             ]
         )
-        if chunk.chunk_summary_zh:
-            lines.extend([f"**段落概括：** {chunk.chunk_summary_zh}", ""])
-
-        for item in chunk.bilingual_lines:
-            if not item.original.strip() and not item.translation_zh.strip():
-                continue
-            lines.extend(
-                [
-                    f"### {format_srt_timestamp(item.start)} - {format_srt_timestamp(item.end)}",
-                    "",
-                    f"原文：{item.original}",
-                    "",
-                    f"中文：{item.translation_zh or '[翻译暂缺]'}",
-                    "",
-                ]
-            )
-
-        if chunk.vocabulary:
-            lines.extend(["### 词汇", ""])
-            for item in chunk.vocabulary:
-                lines.append(
-                    f"- {item.word}"
-                    f"{f'（{item.reading}）' if item.reading else ''}：{item.meaning_zh}"
-                    f"。例：{item.example_original}"
-                )
-            lines.append("")
-
-        grammar_lines: list[str] = []
-        for item in chunk.grammar:
-            grammar_lines.append(f"- {item.pattern}：{item.explanation_zh}。例：{item.example_original}")
-        for item in chunk.fixed_expressions:
-            grammar_lines.append(f"- {item.expression}：{item.meaning_zh}。{item.usage_note_zh}")
-        if grammar_lines:
-            lines.extend(["### 语法与固定表达", "", *grammar_lines, ""])
-
-        if chunk.review_items:
-            lines.extend(["### 复查清单", ""])
-            for item in chunk.review_items:
-                time_text = ""
-                if item.start is not None and item.end is not None:
-                    time_text = f"{format_srt_timestamp(item.start)} - {format_srt_timestamp(item.end)} "
-                lines.append(f"- {time_text}{item.original}：{item.reason_zh}")
-            lines.append("")
-
-    if document.failed_chunks:
-        lines.extend(["## 失败 chunk", ""])
-        for failed in document.failed_chunks:
-            lines.extend([f"- {failed.chunk_id}：{failed.error}", ""])
-
-    output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    for failed in document.failed_chunks:
+        lines.extend([f"## {failed.chunk_id}", "", f"- 失败：{failed.error}", f"- 原始响应：{failed.raw_response_file}", ""])
+    if not lines:
+        lines.extend(["- 本次未发现需要人工复查的可靠风险。", ""])
+    return lines
 
 
 def export_video_summary_markdown(document: AnalysisDocument, output_path: Path) -> None:
-    important_chunks = [
-        chunk for chunk in document.chunks
-        if chunk.content_importance >= 3.5 and any(point.strip() for point in chunk.key_points_zh)
-    ]
-    highlights = sorted(
-        sorted(important_chunks, key=lambda chunk: (-chunk.content_importance, chunk.start))[:12],
-        key=lambda chunk: chunk.start,
-    )
-    full_summary_parts = _unique_text(
-        re.sub(r"\s+", " ", chunk.chunk_summary_zh).strip()
-        for chunk in sorted(document.chunks, key=lambda item: item.start)
-        if chunk.chunk_summary_zh.strip()
-    )
-    full_summary = " ".join(full_summary_parts)
-
-    duration = max((chunk.end for chunk in document.chunks), default=0.0)
-    lines = [
-        "# 视频内容总结",
-        "",
-        f"- 视频时长：{format_srt_timestamp(duration)}",
-        f"- 分析模型：{document.meta.model}",
-        f"- 有效分段：{document.meta.succeeded_chunks}/{document.meta.total_chunks}",
-        "",
-        "## 要点总结",
-        "",
-    ]
-    if highlights:
-        for index, chunk in enumerate(highlights, start=1):
-            lines.extend([
-                f"### {index}. {format_srt_timestamp(chunk.start)} - {format_srt_timestamp(chunk.end)}",
-                "",
-            ])
-            details = [point.strip() for point in chunk.key_points_zh if point.strip()]
-            for point in details:
-                lines.append(f"- {point}")
-            if details:
-                lines.append("")
+    lines = ["# 视频总结", ""]
+    if document.meta.failed_chunks or document.meta.fallback_lines:
+        lines.extend(["> 部分内容分析失败，本总结可能遗漏相关时段。", ""])
+    if document.video_summary:
+        lines.extend(["## 核心要点", ""])
+        chunks = {chunk.chunk_id: chunk for chunk in document.chunks}
+        for point in document.video_summary.points:
+            sources = [chunks[key] for key in dict.fromkeys(point.source_chunk_ids) if key in chunks]
+            times = "；".join(f"{format_srt_timestamp(chunk.start)}–{format_srt_timestamp(chunk.end)}" for chunk in sources)
+            lines.append(f"- {point.text}" + (f"（{times}）" if times else ""))
     else:
-        lines.append("- 本段影音中没有提取到足够明确的重要通知、告知、决定或关键内容。")
-
-    lines.extend(["", "## 全文概括", ""])
-    lines.append(full_summary or "暂未生成可靠的全文概括。")
-
-    if document.failed_chunks:
-        lines.extend([
-            "",
-            "> 部分片段分析失败，本总结可能遗漏对应时段的内容。",
-        ])
+        lines.extend(["> 尚未生成全片总结，以下保留全部可用分段摘要。", "", "## 分段摘要", ""])
+        for chunk in sorted(document.chunks, key=lambda item: item.start):
+            lines.extend([f"### {format_srt_timestamp(chunk.start)} - {format_srt_timestamp(chunk.end)}", ""])
+            if chunk.chunk_summary_zh.strip():
+                lines.extend([chunk.chunk_summary_zh.strip(), ""])
+            points = _unique_text(chunk.key_points_zh)
+            lines.extend(f"- {point}" for point in points)
+            if not chunk.chunk_summary_zh.strip() and not points:
+                lines.append("- 此分段暂无可用摘要。")
+            lines.append("")
     output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def _export_natural_translation_document(
+    document: AnalysisDocument,
+    output_path: Path,
+    *,
+    title: str,
+) -> None:
+    lines = [f"# {title}", ""]
+    for start, end, original, translation in _reading_paragraphs(document):
+        lines.extend(
+            [
+                f"## {format_srt_timestamp(start)} - {format_srt_timestamp(end)}",
+                "",
+                "**原文**",
+                "",
+                original,
+                "",
+                "**自然翻译**",
+                "",
+                translation,
+                "",
+            ]
+        )
+    output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def _reading_paragraphs(document: AnalysisDocument) -> list[tuple[float, float, str, str]]:
+    source = [
+        line
+        for chunk in sorted(document.chunks, key=lambda item: item.start)
+        for line in sorted(chunk.bilingual_lines, key=lambda item: item.start)
+        if line.original.strip() or line.translation_zh.strip()
+    ]
+    paragraphs: list[tuple[float, float, str, str]] = []
+    current = []
+
+    def flush() -> None:
+        if not current:
+            return
+        paragraphs.append(
+            (
+                current[0].start,
+                current[-1].end,
+                _join_spoken_text(line.original for line in current),
+                _join_spoken_text(line.translation_zh for line in current),
+            )
+        )
+        current.clear()
+
+    for line in source:
+        if current and line.start - current[-1].end > 12:
+            flush()
+        current.append(line)
+        translated = _join_spoken_text(item.translation_zh for item in current)
+        span = current[-1].end - current[0].start
+        sentence_end = bool(re.search(r"[。！？!?…][”’\"']?$", translated))
+        if len(translated) >= 320 or len(current) >= 20 or span >= 90 or (len(translated) >= 170 and sentence_end):
+            flush()
+    flush()
+    return paragraphs
+
+
+def _join_spoken_text(values) -> str:
+    result = ""
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            continue
+        if result and result[-1].isascii() and result[-1].isalnum() and text[0].isascii() and text[0].isalnum():
+            result += " "
+        result += text
+    return result
 
 
 PROFILE_CATEGORY_TITLES = {

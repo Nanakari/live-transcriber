@@ -7,12 +7,12 @@ from .chunker import chunk_to_prompt_payload
 from .schemas import AnalysisChunk, AnalysisSegment
 
 
-PROMPT_VERSION = "multilingual-study-v7-optional-features"
+PROMPT_VERSION = "multilingual-study-v9-structured-study-notes"
 
-SYSTEM_PROMPT = """你是一个多语言影音文本的中文翻译、内容分析与学习笔记助手。
-你的主任务是生成按时间对齐的双语文本：保留原文，给出自然中文翻译和偏直译版本。
-源语言可能是任意语言或多语言混用。学习分析只挑真正有价值的词汇、语法、固定表达、语气、文化语境和疑似 ASR 错误。
-不要编造上下文，不确定的人名、作品名、游戏名或梗必须标注不确定。
+SYSTEM_PROMPT = """你是一个多语言影音文本的中文自然翻译与内容提炼助手。
+你的主任务是生成按时间对齐的自然中文翻译，并提取少量真正重要的视频要点。
+翻译要结合相邻句子的语境自然表达，不要直译腔，不要添加翻译说明、语法说明或括号注释。
+源语言可能是任意语言或多语言混用。不要编造上下文；专有名词不确定时采用保守表达。
 必须返回合法 JSON，不要返回 Markdown，不要使用代码块。"""
 
 
@@ -26,52 +26,45 @@ JSON_SCHEMA_HINT = {
     "bilingual_lines": [
         {
             "segment_id": 1,
-            "start": 0.0,
-            "end": 2.5,
-            "original": "原始 ASR 文本",
-            "translation_zh": "自然中文翻译，适合字幕和阅读",
-            "literal_zh": "偏直译版本，方便学习原文结构",
-            "brief_note": "很短的说明",
-            "asr_suspect": False,
-            "asr_issue": "",
-            "confidence": 0.9,
+            "translation_zh": "结合上下文得到的自然中文翻译",
         }
     ],
     "vocabulary": [
         {
-            "word": "词",
-            "reading": "日语用假名读音，不要罗马字；英语可为空或给读音提示",
-            "meaning_zh": "中文意思",
+            "word": "值得学习的源语言词语",
+            "reading": "读音或假名；不确定时留空",
+            "meaning_zh": "中文释义",
             "part_of_speech": "词性",
-            "example_original": "来自本 chunk 的例句",
-            "example_zh": "例句中文",
-            "level": "basic/intermediate/advanced/slang/vtuber_term",
+            "example_original": "来自本段的例句",
+            "example_zh": "例句译文",
+            "level": "intermediate",
         }
     ],
     "grammar": [
         {
-            "pattern": "语法模式",
-            "explanation_zh": "简洁中文说明",
-            "example_original": "来自本 chunk 的例句",
-            "example_zh": "例句中文",
-            "importance": "low/medium/high",
+            "pattern": "本段值得学习的语法句型",
+            "explanation_zh": "中文说明",
+            "example_original": "来自本段的例句",
+            "example_zh": "例句译文",
+            "importance": "medium",
         }
     ],
     "fixed_expressions": [
         {
-            "expression": "固定表达",
-            "meaning_zh": "中文意思",
-            "usage_note_zh": "用法说明",
-            "example_original": "来自本 chunk 的例句",
-            "example_zh": "例句中文",
+            "expression": "本段值得学习的固定表达或口语表达",
+            "meaning_zh": "中文含义",
+            "usage_note_zh": "使用说明",
+            "example_original": "来自本段的例句",
+            "example_zh": "例句译文",
         }
     ],
-    "tone_notes": ["语气、吐槽、反问、撒娇、直播口癖等简短说明"],
-    "content_tags": ["访谈/课程/会议/娱乐/游戏/新闻/日常对话等内容标签"],
-    "speaker_notes": ["只描述文本中有依据的说话人角色、互动关系或明显说话风格，不猜真实身份"],
-    "context_notes": ["文化背景、领域知识、节目或作品语境；不确定时明确标注"],
-    "task_requirements": ["后续转写、翻译、字幕和人工复核需要特别注意的具体事项"],
-    "vtuber_context": ["兼容旧版的直播文化字段；仅在确有 VTuber/直播语境时填写，否则返回空列表"],
+    "review_items": [
+        {
+            "segment_id": 1,
+            "reason_zh": "需要人工复核的原因",
+            "risk_type": "ASR/专有名词/歧义/翻译",
+        }
+    ],
     "profile_observations": [
         {
             "speaker_label": "主要说话人；能可靠区分时可写人物称呼",
@@ -81,17 +74,6 @@ JSON_SCHEMA_HINT = {
             "confidence": 0.8,
         }
     ],
-    "review_items": [
-        {
-            "segment_id": 1,
-            "start": 0.0,
-            "end": 2.5,
-            "original": "需要复查的原文",
-            "reason_zh": "为什么需要复查",
-            "risk_type": "asr/proper_noun/tone/translation",
-        }
-    ],
-    "learning_value": 3.0,
 }
 
 
@@ -110,26 +92,21 @@ source_language: {source_language}
 target_language: {target_language}
 
 要求：
-1. bilingual_lines 必须覆盖输入 segments，保持 segment_id/start/end 对齐。
-2. translation_zh 使用自然中文，适合字幕和阅读。
-3. literal_zh 偏直译，帮助学习原文结构。
-4. brief_note 必须很短，不要写长篇解释。
-5. 只从本 chunk 原文提取 vocabulary / grammar / fixed_expressions，不要凭空扩展。
-6. vocabulary 最多 8 项，优先保留口语、固定搭配、领域术语和中高级词；不要大量收录基础词，除非它在本句有特殊用法。
-7. reading 应使用源语言常用读音表示方式；日语使用平假名/片假名，不要写罗马字。无法确定时留空，不要乱编。
-8. grammar 最多 5 项，不要强行分析每一句。
-9. fixed_expressions 最多 5 项，优先保留固定搭配、惯用表达、口语表达。
-10. review_items 最多 6 项，只放确实值得人工复查的内容。
-11. 疑似 ASR 错误、人名/作品名/游戏名不确定、反话或语气不确定时，写入 review_items。
-12. 空文本或低价值文本也不要静默删除，可在 brief_note 标注 low_value。
-13. 只返回合法 JSON，字段结构必须匹配下面示例。
-14. chunk_summary_zh 用 1-3 句客观概括本段实际内容，用于最终形成整段音频的一段式全文概括；即使是过场或闲聊也只需极简说明，不要逐句复述。
-15. key_points_zh 只提取真正重要且值得通知用户的内容，例如正式通知、告知、计划或日程变化、明确决定、规则要求、关键事实、重要结论和实质性说明。普通寒暄、游戏过程闲聊、情绪反应、重复内容、无结论的杂谈必须返回空列表。每条必须是信息完整的 1-2 句话。
-16. content_importance 使用 0-5 分：正式通知、重大变化或关键决定为 4.5-5；重要事实、结论或实质性说明为 3.5-4.4；一般讨论为 2-3.4；闲聊、过场和重复内容不高于 1.5。
-17. profile_observations 用于建立人物侧写。只记录有原文证据的性格表现、明确表达的喜好或厌恶、价值取向、行为习惯、沟通风格、社交互动方式和身份线索。每段最多 6 条；没有可靠证据时返回空列表。
-18. profile_observations 的 category 只能使用 personality / preference / value / habit / communication / social / identity；confidence 为 0-1。evidence_zh 必须写明事实依据，并区分“本人直接表达”与“根据本段表现谨慎推断”。
-19. 不得根据声音或只言片语推断年龄、疾病、心理障碍、性取向、宗教、政治立场等敏感属性，不做心理诊断。无法可靠区分多人时统一写“主要说话人”，不要猜真实身份。
-20. content_tags / speaker_notes / context_notes / task_requirements 仍用于内容理解和学习资料，内容要具体、简短且有原文依据。
+1. bilingual_lines 必须逐一覆盖输入的每个 segment_id，顺序和数量完全一致；每项只返回 segment_id 和 translation_zh。
+2. translation_zh 必须联系前后文进行自然意译，读起来像正常中文；不要逐词硬译，不要添加直译、说明、点评、读音或括号注释。
+3. 输入可能被 ASR 切得很碎。每个 segment 仍需单独返回，但翻译措辞要与相邻 segment 连贯，不能把句子碎片机械翻译成生硬中文。
+4. chunk_summary_zh 只用一句话客观概括本段主题，不逐句复述。
+5. key_points_zh 最多 2 条，只保留对理解整个视频有帮助的主题、事实、观点、经历、结论或后续计划；寒暄、重复和无信息量过场返回空列表。
+6. content_importance 使用 0-5 分，衡量本段对理解整个视频主题的重要性，而不只衡量是否为正式通知。
+7. 只返回合法 JSON，字段结构必须匹配下面示例，不要输出示例以外的字段。
+8. profile_observations 只记录有原文证据的人物特点，每段最多 4 条；没有可靠证据时返回空列表。
+9. profile_observations 的 category 只能使用 personality / preference / value / habit / communication / social / identity，confidence 为 0-1。
+10. 不得推断敏感属性或做心理诊断；无法可靠区分多人时统一写“主要说话人”。
+11. vocabulary 只提取本段中真正值得学习的词语，每段最多 8 个；不要为了凑数罗列普通寒暄、重复词或不确定的 ASR 片段；没有合适内容时返回空列表。
+12. grammar 和 fixed_expressions 只提取本段中有代表性的语法句型或固定/口语表达，每类最多 4 个；必须给出本段原文例句和中文说明；没有合适内容时返回空列表。
+13. vocabulary 的 word、grammar 的 pattern、fixed_expressions 的 expression 必须保留源语言形式；专有名词只有在确实有学习价值时才列出。
+14. review_items 只记录可能存在 ASR 错误、专有名词不确定、语义歧义或翻译风险的片段，每段最多 8 条；segment_id 必须来自输入，reason_zh 要具体；没有可靠风险时返回空列表。
+15. 学习资料宁缺毋滥，不要编造词义、语法或复查问题；所有学习资料字段都必须是数组。
 
 JSON 结构示例：
 {json.dumps(JSON_SCHEMA_HINT, ensure_ascii=False, indent=2)}
@@ -140,7 +117,7 @@ JSON 结构示例：
 
 
 def build_repair_prompt(raw_text: str) -> str:
-    return f"""下面的模型输出不是合法 JSON。请只修复格式，保留原内容含义，返回一个合法 JSON 对象。
+    return f"""下面的模型输出不是合法 JSON，或字段结构不符合要求。请修复语法与字段结构，保留原内容含义，返回一个合法 JSON 对象。
 不要添加 Markdown，不要使用代码块，不要解释。
 
 原始输出：
@@ -170,7 +147,7 @@ target_language: {target_language}
 1. bilingual_lines 必须逐一覆盖输入的每个 segment_id，数量必须完全一致。
 2. 不得合并、跳过、概括或新增片段。
 3. segment_id/start/end/original 必须原样返回。
-4. translation_zh 使用自然中文；literal_zh 使用偏直译中文。
+4. translation_zh 必须结合相邻片段语境使用自然中文，不要直译，不要添加说明。
 5. 只返回合法 JSON 对象，不要返回 Markdown。
 
 返回结构：
@@ -181,15 +158,7 @@ target_language: {target_language}
   "bilingual_lines": [
     {{
       "segment_id": 1,
-      "start": 0.0,
-      "end": 1.0,
-      "original": "原文",
-      "translation_zh": "自然中文",
-      "literal_zh": "直译中文",
-      "brief_note": "",
-      "asr_suspect": false,
-      "asr_issue": "",
-      "confidence": 0.9
+      "translation_zh": "自然中文"
     }}
   ]
 }}
@@ -208,15 +177,15 @@ def build_chunk_prompt(chunk: AnalysisChunk, *, profile: str, source_language: s
     excluded: list[str] = []
     if not character_profile:
         schema.pop("profile_observations")
-        excluded.extend(("17.", "18.", "19."))
+        excluded.extend(("8.", "9.", "10."))
     if not summary:
         for key in ("chunk_summary_zh", "key_points_zh", "content_importance"):
             schema.pop(key)
-        excluded.extend(("14.", "15.", "16."))
+        excluded.extend(("4.", "5.", "6."))
     if not study_notes:
-        for key in ("vocabulary", "grammar", "fixed_expressions", "tone_notes", "learning_value"):
+        for key in ("vocabulary", "grammar", "fixed_expressions", "review_items"):
             schema.pop(key)
-        excluded.extend(("5.", "6.", "7.", "8.", "9."))
+        excluded.extend(("11.", "12.", "13.", "14.", "15."))
     prompt = prompt.replace(json.dumps(JSON_SCHEMA_HINT, ensure_ascii=False, indent=2),
                             json.dumps(schema, ensure_ascii=False, indent=2))
     return "\n".join(line for line in prompt.splitlines() if not line.startswith(tuple(excluded)))

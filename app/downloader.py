@@ -16,6 +16,27 @@ from .media_assets import default_thumbnail_path
 from .utils import AppError, RunLogger, run_subprocess
 
 
+# Prefer completed, directly downloadable audio over the temporary DASH
+# manifests that YouTube exposes while a finished livestream is still being
+# processed. Keep HLS and yt-dlp's normal choice as fallbacks for live streams
+# and other sites.
+_AUDIO_FORMAT = (
+    "bestaudio[protocol=https]/"
+    "bestaudio[protocol=m3u8_native]/"
+    "bestaudio[protocol=m3u8]/"
+    "bestaudio/best"
+)
+
+# yt-dlp otherwise retries every unavailable DASH fragment ten times and then
+# moves to the next one. A stale post-live manifest can contain thousands of
+# fragments, turning a recoverable 403 into an hours-long apparent hang.
+_FRAGMENT_FAILURE_OPTIONS = [
+    "--fragment-retries",
+    "2",
+    "--abort-on-unavailable-fragments",
+]
+
+
 def _yt_dlp_command() -> list[str] | None:
     root = project_root()
     if getattr(sys, "frozen", False):
@@ -261,11 +282,18 @@ def _n_challenge_error(output: str) -> AppError:
     )
 
 
-def _http_403_error(output: str, attempts: int) -> AppError:
+def _http_403_error(output: str, attempts: int, *, live_status: str = "") -> AppError:
+    post_live_hint = ""
+    if live_status in {"is_live", "post_live"}:
+        post_live_hint = (
+            "\n该视频仍在直播或刚结束，YouTube 可能尚未生成稳定的回放文件。"
+            "请等待几分钟后重试。"
+        )
     return AppError(
         f"YouTube 媒体下载返回 HTTP 403，重新提取签名 URL 后共尝试 {attempts} 次仍然失败。\n"
         "这通常与代理出口变化、YouTube 临时风控或 PO Token 校验有关，不代表 JS challenge 一定失败。\n"
-        "请确认代理出口稳定，稍后重试；如果持续发生，再检查 Cookie 或 PO Token 配置。\n"
+        "请确认代理出口稳定，稍后重试；如果持续发生，再检查 Cookie 或 PO Token 配置。"
+        f"{post_live_hint}\n"
         f"yt-dlp 输出：{output}"
     )
 
@@ -361,7 +389,7 @@ def _download_audio_section_with_ffmpeg(
         output_path.unlink(missing_ok=True)
 
         # Refresh the signed URL on every attempt; YouTube media URLs are short-lived.
-        get_url_command = [*yt_dlp, "-f", "bestaudio/best", "--no-playlist", "-g", url]
+        get_url_command = [*yt_dlp, "-f", _AUDIO_FORMAT, "--no-playlist", "-g", url]
         _add_ffmpeg_location(get_url_command)
         _add_cookie_options(get_url_command, cookies_from_browser, cookies)
         _add_remote_components(get_url_command, remote_components)
@@ -469,6 +497,12 @@ def download_audio(
         remote_components=remote_components,
     )
     title = str(info.get("title") or "")
+    live_status = str(info.get("live_status") or "").strip().lower()
+    if live_status in {"is_live", "post_live"}:
+        logger.write(
+            f"YouTube live_status={live_status}; 将优先使用非 DASH 音频，"
+            "并在直播分片不可用时快速重新提取地址。"
+        )
     section = make_download_section(download_start, download_end, _metadata_duration_seconds(info))
     download_url = _strip_start_time_query(url)
     if section:
@@ -493,8 +527,9 @@ def download_audio(
     command = [
         *yt_dlp,
         "-f",
-        "bestaudio/best",
+        _AUDIO_FORMAT,
         "--no-playlist",
+        *_FRAGMENT_FAILURE_OPTIONS,
         "--newline",
         "--progress",
         "--progress-delta",
@@ -540,14 +575,20 @@ def download_audio(
                 )
                 time.sleep(delay)
                 continue
-            raise _http_403_error(output, max_attempts)
+            raise _http_403_error(output, max_attempts, live_status=live_status)
         raise AppError(
             "URL 下载失败。\n"
             "可能原因：URL 不正确、视频不可访问、需要登录、网络问题、需要代理、yt-dlp 版本过旧，或 ffmpeg 不可用。\n"
             f"yt-dlp 输出：{output}"
         )
 
-    candidates = sorted(audio_dir.glob(f"{output_stem}_source.*"))
+    candidates = sorted(
+        path
+        for path in audio_dir.glob(f"{output_stem}_source.*")
+        if path.is_file()
+        and path.stat().st_size > 0
+        and not path.name.endswith((".part", ".ytdl"))
+    )
     if not candidates:
         raise AppError("yt-dlp 运行结束，但没有找到下载后的音频文件。请检查 yt-dlp 输出和写入权限。")
     return candidates[0], title

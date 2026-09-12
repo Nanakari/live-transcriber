@@ -142,12 +142,13 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--fallback-model", default=None, help="主模型不可用或配额不足时使用的 Gemini 备用模型")
     analyze.add_argument("--chunk-minutes", type=float, default=None, help="每个 chunk 覆盖的分钟数")
     analyze.add_argument("--max-segments-per-chunk", type=int, default=None, help="每个 chunk 最大 segment 数")
+    analyze.add_argument("--invalid-json-retries", type=int, default=None, help="JSON 无效时的额外重试次数")
     analyze.add_argument("--limit-chunks", type=int, default=None, help="只处理前 N 个 chunk")
     analyze.add_argument("--dry-run", action="store_true", help="只展示 chunk 切分结果，不调用 API")
     analyze.add_argument("--resume", action="store_true", help="跳过已成功处理的 chunk")
     analyze.add_argument("--debug", action="store_true", help="输出 traceback 和详细日志")
 
-    preview = subparsers.add_parser("preview", help="生成 PotPlayer 静态封面音频预览包")
+    preview = subparsers.add_parser("preview", help="生成带烧录字幕的 PotPlayer 静态封面音频预览包")
     preview.add_argument("--audio", required=True, help="音频路径，推荐原始音频；也可使用 clean_16k.wav")
     preview.add_argument("--subtitle", required=True, help="translation_zh.srt 路径")
     preview.add_argument("--cover", help="封面图路径；未提供时尝试从 outputs/thumbnails 自动查找")
@@ -161,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline = subparsers.add_parser("pipeline", help="按选择顺序执行转写、分析、预览")
     pipeline.add_argument("--url", help="YouTube 直播回放或普通视频 URL")
     pipeline.add_argument("--input", help="本地音频或视频文件")
-    pipeline.add_argument("--modules", default="transcribe,analyze", help="逗号分隔：transcribe,analyze,preview；默认不生成预览")
+    pipeline.add_argument("--modules", default="transcribe,analyze,preview", help="逗号分隔：transcribe,analyze,preview；默认生成带字幕视频")
     pipeline.add_argument("--transcript", help="跳过转写时使用的 transcript.json")
     pipeline.add_argument("--audio", help="跳过转写时用于预览的音频")
     pipeline.add_argument("--subtitle", help="跳过分析时用于预览的 translation_zh.srt")
@@ -479,6 +480,11 @@ def analyze_task(args: argparse.Namespace) -> dict[str, Any]:
         max_segments_per_chunk=int(args.max_segments_per_chunk or analysis_config.get("max_segments_per_chunk", 40)),
         temperature=float(analysis_config.get("temperature", 0.2)),
         max_retries=int(analysis_config.get("max_retries", 2)),
+        invalid_json_retries=max(0, int(
+            getattr(args, "invalid_json_retries", None)
+            if getattr(args, "invalid_json_retries", None) is not None
+            else analysis_config.get("invalid_json_retries", 3)
+        )),
         retry_backoff_seconds=float(analysis_config.get("retry_backoff_seconds", 3)),
         request_timeout_seconds=float(analysis_config.get("request_timeout_seconds", 300)),
         request_interval_seconds=float(analysis_config.get("request_interval_seconds", 6)),
@@ -549,7 +555,6 @@ def _print_preview_result(result: dict[str, Path]) -> None:
 
 
 def handle_pipeline(args: argparse.Namespace) -> int:
-    config = load_config()
     modules = [part.strip() for part in str(args.modules or "").split(",") if part.strip()]
     allowed = {"transcribe", "analyze", "preview"}
     unknown = [module for module in modules if module not in allowed]
@@ -561,7 +566,6 @@ def handle_pipeline(args: argparse.Namespace) -> int:
     transcript: Path | None = Path(args.transcript).expanduser() if args.transcript else None
     audio: Path | None = Path(args.audio).expanduser() if args.audio else None
     subtitle: Path | None = Path(args.subtitle).expanduser() if args.subtitle else None
-    preview_video: Path | None = None
     exit_code = 0
 
     if "transcribe" in modules and not args.url and not args.input:
@@ -658,18 +662,10 @@ def handle_pipeline(args: argparse.Namespace) -> int:
         _print("[pipeline] 开始模块三：PotPlayer 预览")
         preview_result = _create_preview(preview_args)
         _print_preview_result(preview_result)
-        preview_video = preview_result["video"]
 
     deleted_wavs = _cleanup_generated_pipeline_wavs(transcript, audio)
     for deleted_wav in deleted_wavs:
         _print(f"[pipeline] 已删除中间 WAV：{deleted_wav}")
-    delete_source_m4a = bool(
-        config.get("audio", {}).get("delete_source_m4a_after_preview", True)
-    )
-    if delete_source_m4a and preview_video:
-        deleted_sources = _cleanup_pipeline_source_m4a(transcript, audio, preview_video)
-        for deleted_source in deleted_sources:
-            _print(f"[pipeline] 已删除原始 M4A：{deleted_source}")
     _print("[pipeline] 完整处理完成。" if exit_code == 0 else "[pipeline] 部分完成，请复查缺失的翻译。")
     return exit_code
 
@@ -696,65 +692,6 @@ def _cleanup_generated_pipeline_wavs(transcript: Path | None, audio: Path | None
                 deleted.append(path)
         except OSError as exc:
             _print(f"[pipeline] 警告：无法删除中间 WAV {path}：{exc}")
-    return deleted
-
-
-def _cleanup_pipeline_source_m4a(
-    transcript: Path | None,
-    audio: Path | None,
-    preview_video: Path,
-) -> list[Path]:
-    """Delete only the same media group's generated source M4A after preview succeeds."""
-    group_dir = None
-    for artifact in (transcript, audio, preview_video):
-        if artifact:
-            group_dir = group_dir_from_artifact_path(artifact)
-            if group_dir:
-                break
-    if group_dir is None:
-        return []
-
-    try:
-        group_dir = group_dir.resolve()
-        previews_dir = (group_dir / "previews").resolve()
-        preview_path = preview_video.resolve()
-        preview_path.relative_to(previews_dir)
-    except (OSError, ValueError):
-        return []
-    if not preview_path.is_file() or preview_path.stat().st_size <= 0:
-        return []
-
-    candidates: list[Path] = []
-    if audio:
-        candidates.append(audio)
-    if transcript and transcript.is_file():
-        try:
-            meta = json.loads(transcript.read_text(encoding="utf-8")).get("meta", {})
-            source_value = str(meta.get("source_audio_file") or "").strip()
-            if source_value:
-                candidates.append(Path(source_value))
-        except (OSError, ValueError, TypeError):
-            pass
-
-    audio_dir = (group_dir / "audio").resolve()
-    deleted: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        try:
-            path = candidate.expanduser().resolve()
-        except OSError:
-            continue
-        if path in seen:
-            continue
-        seen.add(path)
-        if path.parent != audio_dir or not path.name.endswith("_source.m4a"):
-            continue
-        try:
-            path.unlink(missing_ok=True)
-            if not path.exists():
-                deleted.append(path)
-        except OSError as exc:
-            _print(f"[pipeline] 警告：无法删除原始 M4A {path}：{exc}")
     return deleted
 
 
