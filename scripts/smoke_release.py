@@ -24,6 +24,25 @@ def main() -> None:
                           [str(release / "_internal" / "tools" / "ffmpeg.exe"), "-version"],
                           [str(release / "_internal" / "tools" / "node.exe"), "--version"]):
             subprocess.run(arguments, env=env, cwd=directory, check=True, capture_output=True, timeout=60, creationflags=flags)
+        media = Path(directory) / "字幕 sample's"
+        media.mkdir()
+        ffmpeg = str(release / "_internal" / "tools" / "ffmpeg.exe")
+        for arguments in (
+            [ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x180", "-frames:v", "1", str(media / "cover.png")],
+            [ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(media / "audio.wav")],
+        ):
+            subprocess.run(arguments, env=env, cwd=directory, check=True, capture_output=True, timeout=60, creationflags=flags)
+        (media / "translation.srt").write_text("1\n00:00:00,000 --> 00:00:00,900\n字幕测试\n", encoding="utf-8")
+        video_dir = media / "video"
+        result = subprocess.run(
+            [str(executable), "preview", "--audio", str(media / "audio.wav"), "--subtitle", str(media / "translation.srt"),
+             "--cover", str(media / "cover.png"), "--output-dir", str(video_dir), "--resolution", "320x180"],
+            env=env, cwd=directory, capture_output=True, timeout=60, creationflags=flags,
+        )
+        assert result.returncode == 0, result.stdout.decode("utf-8", errors="replace") + result.stderr.decode("utf-8", errors="replace")
+        assert (video_dir / "live_preview.mp4").stat().st_size > 0
+        assert (video_dir / "subtitles" / "display.bilingual.ass").exists()
+        assert (video_dir / "assets" / "manifest.json").exists()
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -46,6 +65,7 @@ def main() -> None:
                 assert status["ffmpeg"] and status["yt_dlp"] and status["faster_whisper"], status
                 assert not status["gemini_api_key_detected"], "Release picked up a developer credential"
                 assert status["defaults"]["proxy"] == ""
+                assert status["defaults"]["quality"] == "high"
                 for path, marker in (("/", "workbench.js"), ("/?view=classic", "classic.js"), ("/static/classic.js", "renderQuickAction"), ("/static/classic.css", ".shell"), ("/static/workbench.js", "startTask"), ("/static/workbench.css", ".shell")):
                     with urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as response:
                         if path.endswith(".js"):

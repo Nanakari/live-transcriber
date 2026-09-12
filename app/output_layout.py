@@ -29,7 +29,7 @@ def media_subdirs(group_dir: Path) -> dict[str, Path]:
         "audio": group_dir / "audio",
         "transcripts": group_dir / "transcripts",
         "analysis": group_dir / "analysis",
-        "previews": group_dir / "previews",
+        "previews": group_dir / "video",
         "logs": group_dir / "logs",
         "thumbnails": group_dir / "thumbnails",
     }
@@ -40,6 +40,28 @@ def ensure_media_subdirs(group_dir: Path) -> dict[str, Path]:
     for path in dirs.values():
         path.mkdir(parents=True, exist_ok=True)
     return dirs
+
+
+def write_media_index(group_dir: Path) -> None:
+    """Give each task a concise entry point without moving historical files."""
+    lines = ["# 媒体任务", "", "## 阅读与播放", ""]
+    videos = list(group_dir.glob("video/live_preview.mp4")) or list(group_dir.glob("previews/*/live_preview.mp4"))
+    if videos:
+        lines.append(f"- [播放字幕视频]({videos[0].relative_to(group_dir).as_posix()})（任意 MP4 播放器）")
+    for transcript in sorted((group_dir / "transcripts").glob("*_transcript.md")):
+        lines.append(f"- [原文转写](<{transcript.relative_to(group_dir).as_posix()}>)")
+    analyses = sorted((group_dir / "analysis").glob("*/analysis.json"), key=lambda path: path.stat().st_mtime)
+    if analyses:
+        for name, label in [("video_summary.md", "全片总结"), ("study_notes.md", "学习笔记"), ("bilingual.md", "完整双语稿"), ("review.md", "复查清单")]:
+            path = analyses[-1].parent / name
+            if path.exists():
+                lines.append(f"- [{label}]({path.relative_to(group_dir).as_posix()})")
+    lines.extend(["", "## 目录", "", "- video/：最终视频，字幕位于 subtitles/，辅助文件位于 assets/。",
+                  "- audio/：保留的源音频，重建视频时使用。",
+                  "- transcripts/：原文转写与精细时间轴。",
+                  "- analysis/：按运行时间保留的分析文档，以上入口指向最新版本。",
+                  "- thumbnails/、logs/：封面和处理记录。", ""])
+    (group_dir / "README.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def is_in_media(path: Path) -> bool:

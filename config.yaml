@@ -3,7 +3,7 @@
   timezone: "Asia/Tokyo"
 
 transcribe:
-  quality: "fast"
+  quality: "high"
   language: "auto"
   device: "auto"
   compute_type: "int8_float16"

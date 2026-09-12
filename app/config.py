@@ -14,7 +14,7 @@ from .utils import AppError
 DEFAULT_CONFIG: dict[str, Any] = {
     "app": {"output_dir": "outputs", "timezone": "Asia/Tokyo"},
     "transcribe": {
-        "quality": "fast",
+        "quality": "high",
         "language": "auto",
         "device": "auto",
         "compute_type": "int8_float16",

@@ -7,9 +7,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .subtitles import write_display_subtitles
 from .config import project_root, tool_path
 from .media_assets import default_thumbnail_path
-from .output_layout import ensure_media_subdirs, group_dir_from_artifact_path
+from .output_layout import ensure_media_subdirs, group_dir_from_artifact_path, write_media_index
 from .utils import AppError, RunLogger, command_exists, format_srt_timestamp, generate_run_id, run_subprocess
 
 
@@ -34,9 +35,9 @@ class PreviewOptions:
     debug: bool = False
 
 
-def create_potplayer_preview(options: PreviewOptions) -> dict[str, Path]:
-    if options.mode != "potplayer":
-        raise AppError("preview 当前只支持 --mode potplayer。")
+def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
+    if options.mode not in {"video", "potplayer"}:
+        raise AppError("preview 支持 --mode video。")
     ensure_ffmpeg_for_preview()
     if not command_exists("ffmpeg"):
         raise AppError(
@@ -63,24 +64,37 @@ def create_potplayer_preview(options: PreviewOptions) -> dict[str, Path]:
     else:
         group_dir = group_dir_from_artifact_path(subtitle) or group_dir_from_artifact_path(audio)
         if group_dir:
-            output_dir = ensure_media_subdirs(group_dir)["previews"] / "potplayer"
+            output_dir = group_dir / "video"
         else:
             output_dir = project_root() / "outputs" / "previews" / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
-    logger = RunLogger(output_dir / "run.log", debug=options.debug)
+    support_dir = output_dir / "assets"
+    subtitle_dir = output_dir / "subtitles"
+    support_dir.mkdir(exist_ok=True)
+    subtitle_dir.mkdir(exist_ok=True)
+    logger = RunLogger(support_dir / "run.log", debug=options.debug)
 
     video_path = output_dir / options.video_name
-    subtitle_path = output_dir / options.subtitle_name
+    subtitle_path = subtitle_dir / options.subtitle_name
     auto_subtitle_path = output_dir / f"{video_path.stem}.srt"
-    cover_path = output_dir / "cover.jpg"
+    cover_path = support_dir / "cover.jpg"
     readme_path = output_dir / "README_play.txt"
 
     prepare_cover(cover, cover_path, logger)
     shutil.copy2(subtitle, subtitle_path)
-    ja_subtitle = maybe_copy_original_subtitle(subtitle, output_dir)
-    bilingual_subtitle = maybe_write_bilingual_subtitle(subtitle_path, ja_subtitle, output_dir)
-    study_subtitle = maybe_write_study_subtitle(subtitle, ja_subtitle, output_dir)
-    burn_subtitle = bilingual_subtitle or subtitle_path
+    ja_subtitle = maybe_copy_original_subtitle(subtitle, subtitle_dir)
+    bilingual_subtitle = maybe_write_bilingual_subtitle(subtitle_path, ja_subtitle, subtitle_dir)
+    original_blocks = read_srt_blocks(ja_subtitle) if ja_subtitle else []
+    original_lookup = build_srt_lookup(original_blocks)
+    display_srt = subtitle_dir / "display.bilingual.srt"
+    burn_subtitle = subtitle_dir / "display.bilingual.ass"
+    cues = []
+    for block in read_srt_blocks(subtitle_path):
+        original = match_srt_block(block, original_lookup)
+        cues.append({"start": block["start"], "end": block["end"],
+                     "original": original["text"] if original else "",
+                     "translation": block["text"]})
+    write_display_subtitles(cues, display_srt, burn_subtitle)
     build_preview_video(
         audio=audio,
         cover=cover_path,
@@ -92,19 +106,23 @@ def create_potplayer_preview(options: PreviewOptions) -> dict[str, Path]:
     )
     # Only remove the legacy auto-loaded subtitle after the burned video succeeds.
     auto_subtitle_path.unlink(missing_ok=True)
-    learning_notes = copy_learning_notes(subtitle, output_dir)
-    write_readme(readme_path, video_path.name, subtitle_path.name, learning_notes, study_subtitle)
+    write_readme(readme_path, video_path.name, "subtitles/" + subtitle_path.name)
+    (support_dir / "manifest.json").write_text(json.dumps({
+        "transcript_run_id": infer_transcript_run_id_from_analysis(subtitle),
+        "audio": str(audio.resolve()), "analysis_subtitle": str(subtitle.resolve()),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    group = group_dir_from_artifact_path(subtitle) or group_dir_from_artifact_path(audio)
+    if group:
+        write_media_index(group)
     return {
         "output_dir": output_dir,
         "video": video_path,
         "subtitle": subtitle_path,
         "bilingual_subtitle": bilingual_subtitle,
-        "study_subtitle": study_subtitle,
-        "vocabulary": learning_notes.get("vocabulary.md"),
-        "grammar": learning_notes.get("grammar.md"),
+        "display_subtitle": display_srt,
         "cover": cover_path,
         "readme": readme_path,
-        "log": output_dir / "run.log",
+        "log": support_dir / "run.log",
     }
 
 
@@ -180,7 +198,7 @@ def build_preview_video(
         "-loop",
         "1",
         "-framerate",
-        "1",
+        "25",
         "-i",
         str(cover),
         "-i",
@@ -195,6 +213,8 @@ def build_preview_video(
         "libx264",
         "-tune",
         "stillimage",
+        "-preset",
+        "veryfast",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -225,7 +245,7 @@ def build_preview_video(
     result = run_subprocess(command, logger, stream_output=True)
     if result.returncode != 0:
         raise AppError(
-            "生成 PotPlayer 预览 MP4 失败。\n"
+            "生成字幕视频 MP4 失败。\n"
             f"ffmpeg 输出：{(result.stderr or result.stdout).strip()}"
         )
     if not output.exists() or output.stat().st_size == 0:
@@ -236,6 +256,8 @@ def build_preview_video(
 def build_burn_subtitle_filter(subtitle: Path) -> str:
     """Build a libass filter that burns readable subtitles into the video."""
     subtitle_path = escape_filter_path(subtitle)
+    if subtitle.suffix.lower() == ".ass":
+        return f"ass=filename={subtitle_path}"
     return f"subtitles=filename={subtitle_path}:force_style='{SUBTITLE_FORCE_STYLE}'"
 
 
@@ -592,27 +614,22 @@ def write_readme(
     learning_notes: dict[str, Path] | None = None,
     study_subtitle: Path | None = None,
 ) -> None:
-    notes = learning_notes or {}
-    note_lines: list[str] = []
-    if "vocabulary.md" in notes:
-        note_lines.append("8. vocabulary.md 是模块二生成的生词讲解。")
-    if "grammar.md" in notes:
-        note_lines.append("9. grammar.md 是模块二生成的语法分析。")
-    if study_subtitle:
-        note_lines.append("10. live_preview.study.srt 是带当前句生词和语法提示的学习字幕，可在 PotPlayer 中手动切换。")
-    extra = "\n".join(note_lines)
-    if extra:
-        extra += "\n"
-    content = f"""带字幕视频使用说明
+    content = f"""字幕视频使用说明
 
-1. 用 PotPlayer 打开 {video_name}。
-2. 字幕已经烧录到 MP4 画面中，打开视频即可看到，不依赖播放器字幕样式。
-3. 同目录仍保留外挂字幕；需要修改字幕或切换双语版本时，可加载 {subtitle_name} 或 live_preview.bilingual.srt，但不会改变已经生成的 MP4。
-4. 如果字幕不同步，可以使用 PotPlayer 的字幕同步功能调整延迟。
-5. {subtitle_name} 是外挂字幕，可以直接用文本编辑器或字幕工具修改。
-6. live_preview.mp4 使用直播缩略图作为静态背景；没有直播缩略图时使用内置默认封面。
-7. 如果存在 live_preview.ja.srt，它是模块一原文字幕，可按需手动加载。
-{extra}预览包包含模块三播放文件，以及可直接打开的学习资料。
+直接打开 {video_name}，使用系统默认播放器或任何支持 MP4 的播放器。
+字幕已经烧录，播放时无需加载外挂字幕。
+
+目录：
+- {video_name}：最终视频（封面背景、音频、日中字幕）。
+- subtitles/：细分原文／译文字幕，以及按连续语音合并的 display.bilingual.srt / .ass。
+- assets/：封面、生成日志与关联信息。
+
+显示字幕按连续语音合并，最多约9秒一组，明显停顿处断开；时间相对所选音频片段。
+需要改字幕时，请编辑字幕并重新生成视频，播放器的字幕偏移不能修改已烧录的画面。
+总结与学习笔记在同一媒体任务的 analysis/ 中，源音频保留在 audio/ 中。
 """
     path.write_text(content, encoding="utf-8")
 
+
+# Keep older CLI integrations working.
+create_potplayer_preview = create_video_preview

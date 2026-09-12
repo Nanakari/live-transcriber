@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 import socket
@@ -390,11 +391,11 @@ def _default_preview_output_dir(artifact_run_id: str, subtitle: str, audio: str)
     run_id = artifact_run_id or _transcript_run_id_from_analysis_file(Path(subtitle)) or _run_id_from_audio_path(Path(audio))
     group_dir = group_dir_from_artifact_path(Path(subtitle)) or group_dir_from_artifact_path(Path(audio))
     if group_dir:
-        return str((ensure_media_subdirs(group_dir)["previews"] / "potplayer").resolve())
+        return str((group_dir / "video").resolve())
     safe = _safe_run_id(run_id)
     if not safe:
         return ""
-    return str((project_root() / "outputs" / "previews" / f"{safe}_potplayer").resolve())
+    return str((project_root() / "outputs" / "previews" / safe).resolve())
 
 
 def _default_cover_for_preview(subtitle: str, audio: str) -> str:
@@ -405,6 +406,7 @@ def _default_cover_for_preview(subtitle: str, audio: str) -> str:
         for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
             candidates.extend(thumbs.glob(pattern))
         candidates.extend(group_dir.glob("previews/*/cover.jpg"))
+        candidates.extend(group_dir.glob("video/assets/cover.jpg"))
     legacy = project_root() / "outputs" / "thumbnails"
     for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
         candidates.extend(legacy.glob(pattern))
@@ -503,7 +505,7 @@ def _recent_dirs_many(bases: list[Path], *, recursive: bool = False, limit: int 
         for path in candidates:
             if not path.is_dir():
                 continue
-            if path.name in {"audio", "transcripts", "analysis", "previews", "logs", "thumbnails", "chunks", "failed", "_cache"}:
+            if path.name in {"audio", "transcripts", "analysis", "previews", "video", "assets", "subtitles", "logs", "thumbnails", "chunks", "failed", "_cache"}:
                 continue
             key = str(path.resolve()).lower()
             if key in seen:
@@ -550,26 +552,7 @@ def _latest_preview(base: Path) -> dict[str, Any] | None:
     if not candidates:
         return None
     run = max(candidates, key=lambda path: path.stat().st_mtime)
-    names = [
-        "live_preview.mp4",
-        "live_preview.study.srt",
-        "live_preview.bilingual.srt",
-        "live_preview.srt",
-        "live_preview.zh.srt",
-        "live_preview.ja.srt",
-        "vocabulary.md",
-        "grammar.md",
-        "cover.jpg",
-        "README_play.txt",
-        "run.log",
-    ]
-    files = {name: _file_item(run / name) for name in names if (run / name).exists()}
-    return {
-        "name": run.name,
-        "path": str(run.resolve()),
-        "modified": datetime_from_timestamp(run.stat().st_mtime),
-        "files": files,
-    }
+    return _preview_result(run)
 
 
 def _artifact_sets(root: Path) -> list[dict[str, Any]]:
@@ -756,6 +739,14 @@ def _delete_artifact_run(run_id: str, root: Path) -> dict[str, Any]:
 
 
 def _preview_transcript_run_id(run: Path, analysis_by_transcript: dict[str, dict[str, Any]]) -> str:
+    manifest = run / "assets" / "manifest.json"
+    if manifest.exists():
+        try:
+            candidate = str(json.loads(manifest.read_text(encoding="utf-8")).get("transcript_run_id") or "")
+            if candidate in analysis_by_transcript:
+                return candidate
+        except (OSError, ValueError):
+            pass
     if run.name.endswith("_potplayer"):
         candidate = run.name.removesuffix("_potplayer")
         if candidate in analysis_by_transcript:
@@ -921,6 +912,7 @@ def _preview_result(run: Path) -> dict[str, Any] | None:
         return None
     names = [
         "live_preview.mp4",
+        "display.bilingual.srt",
         "live_preview.study.srt",
         "live_preview.bilingual.srt",
         "live_preview.srt",
@@ -936,7 +928,8 @@ def _preview_result(run: Path) -> dict[str, Any] | None:
         "name": run.name,
         "path": str(run.resolve()),
         "modified": datetime_from_timestamp(run.stat().st_mtime),
-        "files": {name: _file_item(run / name) for name in names if (run / name).exists()},
+        "files": {name: _file_item(path) for name in names
+                  if (path := _first_existing(run, [name, "subtitles/" + name, "assets/" + name]))},
     }
 
 

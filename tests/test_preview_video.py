@@ -59,10 +59,10 @@ def test_preview_prefers_bilingual_subtitle_for_burn_in(monkeypatch, tmp_path: P
         )
     )
 
-    assert captured["subtitle"] == output_dir / "live_preview.bilingual.srt"
+    assert captured["subtitle"] == output_dir / "subtitles/display.bilingual.ass"
     assert not legacy_subtitle.exists()
-    assert (output_dir / "live_preview.zh.srt").exists()
-    assert (output_dir / "live_preview.bilingual.srt").exists()
+    assert (output_dir / "subtitles/live_preview.zh.srt").exists()
+    assert (output_dir / "subtitles/live_preview.bilingual.srt").exists()
 
 
 @pytest.mark.parametrize("name", ["normal", "speaker's", "中文 空格 [1],semi;"])
@@ -126,6 +126,7 @@ def test_preview_burns_subtitles_and_uses_audio_duration(monkeypatch, tmp_path: 
     assert "PrimaryColour=&H00FFFFFF" in vf
     assert "OutlineColour=&H00000000" in vf
     assert "BackColour=&H80000000" in vf
+    assert command[command.index("-framerate") + 1] == "25"
     assert "-shortest" not in command
     assert command[command.index("-t") + 1] == "3.500"
     assert captured["validated"] == (output, 3.5)

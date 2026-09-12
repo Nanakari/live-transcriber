@@ -219,7 +219,7 @@ function renderAnalysisQuick(run, item = null) {
 function renderPreviewQuick(run, item = null) {
   const title = item ? shortArtifactLabel(item) : "当前文件组";
   if (!run) {
-    $("previewQuick").innerHTML = `<p>${escapeHtml(title)} 暂无媒体预览包。请先生成 PotPlayer 预览。</p>`;
+    $("previewQuick").innerHTML = `<p>${escapeHtml(title)} 暂无媒体预览包。请先生成 字幕视频。</p>`;
     return;
   }
   const files = run.files || {};
@@ -231,8 +231,8 @@ function renderPreviewQuick(run, item = null) {
   const readme = files["README_play.txt"];
   const primaryActions = [
     // Subtitles are burned into live_preview.mp4; do not pass an external
-    // subtitle here or PotPlayer would render a duplicate subtitle layer.
-    video ? ["播放预览视频", { path: video.path, action: "potplayer" }, "primary-action"] : null,
+    // subtitle here or the player would render a duplicate subtitle layer.
+    video ? ["播放预览视频", { path: video.path, action: "file" }, "primary-action"] : null,
     [bilingual ? "查看双语字幕" : "查看中文字幕", bilingual || zh, "secondary-action"],
     ["打开预览目录", { path: run.path, action: "folder" }, "secondary-action"],
   ].filter(Boolean);
@@ -268,7 +268,7 @@ document.addEventListener("click", (event) => {
   if (!button) return;
   const {action, path, subtitle, jobId} = button.dataset;
   if (action === "folder") openFolder(path, button);
-  else if (action === "potplayer") openPotPlayer(path, subtitle, button);
+  else if (action === "file") openFile(path, button);
   else if (action === "preview") previewPath(path, button);
   else if (action === "log") showJobLog(jobId, true).catch(error => alert(error.message));
   else if (action === "stop") stopJob(jobId);
@@ -429,12 +429,6 @@ async function openFolder(path, button = null) {
 async function openFile(path, button = null) {
   setActiveAction(button);
   try { await api("/api/open-file", { method: "POST", body: JSON.stringify({ path }) }); }
-  catch (err) { alert(err.message); }
-}
-
-async function openPotPlayer(video, subtitle, button = null) {
-  setActiveAction(button);
-  try { await api("/api/open-potplayer", { method: "POST", body: JSON.stringify({ video, subtitle }) }); }
   catch (err) { alert(err.message); }
 }
 

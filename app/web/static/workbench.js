@@ -45,7 +45,7 @@ async function loadStatus(initial = false) {
     const defaults = status.defaults || {};
     let saved = {};
     try { saved = JSON.parse(storageGet(localStorage, SETTINGS) || "{}"); } catch {}
-    const values = {device: defaults.device || "auto", proxy: defaults.proxy || "", language: defaults.language || "auto", quality: defaults.quality || "fast", analysisModel: status.gemini_model, fallbackModel: status.gemini_fallback_model, ...saved};
+    const values = {device: defaults.device || "auto", proxy: defaults.proxy || "", language: defaults.language || "auto", quality: defaults.quality || "high", analysisModel: status.gemini_model, fallbackModel: status.gemini_fallback_model, ...saved};
     fields.forEach(id => { if (values[id] != null) $(id).value = values[id]; });
     const remembered = storageGet(localStorage, KEY);
     $("apiKey").value = storageGet(sessionStorage, KEY) || remembered || "";
@@ -220,7 +220,7 @@ $("openDataBtn").addEventListener("click", safe(() => post("/api/open-folder", {
 $("folderBtn").addEventListener("click", safe(() => post("/api/open-folder", {path: selected()?.group_path || selected()?.transcript?.path})));
 $("reanalyzeBtn").addEventListener("click", safe(() => reanalyze()));
 $("previewBtn").addEventListener("click", safe(async () => { const item = selected(); await startJob("/api/preview", {audio: (item.audio || item.clean_audio).path, subtitle: item.analysis.files["translation_zh.srt"].path, artifact_run_id: item.run_id}); }));
-$("playBtn").addEventListener("click", safe(() => { const files = selected().preview.files; return post("/api/open-potplayer", {video: files["live_preview.mp4"].path}); }));
+$("playBtn").addEventListener("click", safe(() => { const files = selected().preview.files; return post("/api/open-file", {path: files["live_preview.mp4"].path}); }));
 $("deleteBtn").addEventListener("click", safe(async () => {
   const item = selected();
   if (!item || !confirm(`删除“${item.label}”的处理结果、缓存音频和预览文件？原始输入文件不会删除。`)) return;

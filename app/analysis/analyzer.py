@@ -6,7 +6,7 @@ from typing import Any
 
 from app.config import project_root
 from app.utils import AppError, RunLogger, generate_run_id
-from app.output_layout import ensure_media_subdirs, group_dir_from_artifact_path, group_name_from_stem, media_group_dir
+from app.output_layout import ensure_media_subdirs, group_dir_from_artifact_path, group_name_from_stem, media_group_dir, write_media_index
 
 from .cache import cache_key, chunk_result_path, load_cached_result, save_chunk_result, save_failed_response
 from .chunker import load_transcript, make_chunks, transcript_segments
@@ -189,6 +189,7 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
     analysis_document = AnalysisDocument(meta=meta, chunks=results, failed_chunks=failed)
     generate_video_summary(analysis_document, client, logger)
     output_paths = export_all(analysis_document, output_dir)
+    write_media_index(group_dir)
     logger.write(
         f"analysis finished success={len(chunks) - len(failed)} failed={len(failed)} skipped={skipped} "
         f"fallback_chunks={fallback_chunks} fallback_lines={fallback_lines} output={output_dir}"

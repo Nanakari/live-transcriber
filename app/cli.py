@@ -21,7 +21,7 @@ from .media_assets import default_thumbnail_path
 from .exporters.json_exporter import export_json
 from .exporters.markdown_exporter import export_markdown
 from .exporters.srt_exporter import export_srt
-from .preview import PreviewOptions, create_potplayer_preview
+from .preview import PreviewOptions, create_video_preview
 from .schemas import TranscriptDocument, TranscriptMeta
 from .transcriber import transcribe_audio
 from .output_layout import ensure_media_subdirs, group_dir_from_artifact_path, media_group_dir, group_name_from_stem
@@ -148,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--resume", action="store_true", help="跳过已成功处理的 chunk")
     analyze.add_argument("--debug", action="store_true", help="输出 traceback 和详细日志")
 
-    preview = subparsers.add_parser("preview", help="生成带烧录字幕的 PotPlayer 静态封面音频预览包")
+    preview = subparsers.add_parser("preview", help="生成带烧录字幕的 通用视频 静态封面音频预览包")
     preview.add_argument("--audio", required=True, help="音频路径，推荐原始音频；也可使用 clean_16k.wav")
     preview.add_argument("--subtitle", required=True, help="translation_zh.srt 路径")
     preview.add_argument("--cover", help="封面图路径；未提供时尝试从 outputs/thumbnails 自动查找")
@@ -156,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     preview.add_argument("--resolution", default="1280x720", help="预览视频分辨率，默认 1280x720")
     preview.add_argument("--subtitle-name", default="live_preview.zh.srt", help="输出中文字幕文件名")
     preview.add_argument("--video-name", default="live_preview.mp4", help="输出视频文件名")
-    preview.add_argument("--mode", default="potplayer", choices=["potplayer"], help="预览模式，默认 potplayer")
+    preview.add_argument("--mode", default="video", choices=["video", "potplayer"], help="预览模式，默认 video")
     preview.add_argument("--debug", action="store_true", help="打印 ffmpeg 命令和错误信息")
 
     pipeline = subparsers.add_parser("pipeline", help="按选择顺序执行转写、分析、预览")
@@ -420,6 +420,8 @@ def transcribe_task(args: argparse.Namespace) -> dict[str, Path]:
     export_json(cleaned_document, transcript_json)
     export_srt(cleaned_document, transcript_srt)
     export_markdown(cleaned_document, transcript_md)
+    from .output_layout import write_media_index
+    write_media_index(group_dir)
     if not keep_clean_audio:
         try:
             clean_audio.unlink(missing_ok=True)
@@ -545,11 +547,11 @@ def _create_preview(args: argparse.Namespace) -> dict[str, Path]:
         mode=args.mode,
         debug=args.debug,
     )
-    return create_potplayer_preview(options)
+    return create_video_preview(options)
 
 
 def _print_preview_result(result: dict[str, Path]) -> None:
-    _print("\nPotPlayer 预览包已生成：")
+    _print("\n通用视频 预览包已生成：")
     for path in result.values():
         _print(f"- {path}")
 
@@ -656,10 +658,10 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             resolution=args.resolution,
             subtitle_name="live_preview.zh.srt",
             video_name="live_preview.mp4",
-            mode="potplayer",
+            mode="video",
             debug=args.debug,
         )
-        _print("[pipeline] 开始模块三：PotPlayer 预览")
+        _print("[pipeline] 开始模块三：通用视频 预览")
         preview_result = _create_preview(preview_args)
         _print_preview_result(preview_result)
 
