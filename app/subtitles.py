@@ -7,6 +7,13 @@ from pathlib import Path
 from .utils import format_srt_timestamp
 
 
+# ASS stores colours as ``&HAABBGGRR`` rather than CSS ``#RRGGBB``.
+ASS_ORIGINAL_COLOR = "&H00FFFFFF"       # #FFFFFF, warm white source text
+ASS_TRANSLATION_COLOR = "&H004DD8FF"   # #FFD84D, warm yellow translation text
+ASS_OUTLINE_COLOR = "&H00141414"       # #141414, readable on bright footage
+ASS_TRANSPARENT_COLOR = "&HFF000000"   # fully transparent subtitle background
+
+
 def _join(parts: list[str]) -> str:
     return " ".join(part.strip() for part in parts if part.strip())
 
@@ -56,7 +63,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Microsoft YaHei,28,&H00FFFFFF,&H00FFFFFF,&HA0000000,&HA0000000,0,0,0,0,100,100,0,0,3,2,0,2,60,60,30,1
+Style: Default,Microsoft YaHei,28,&H00FFFFFF,&H00FFFFFF,&H00141414,&HFF000000,0,0,0,0,100,100,0,0,1,2,1,2,60,60,30,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -69,8 +76,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         # Prevent transcript text from being interpreted as ASS style overrides.
         return text.replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\n", " ")
 
+    def colored_line(text: str, color: str) -> str:
+        return f"{{\\c{color}&}}{escape(text)}"
+
+    def dialogue_text(cue: dict) -> str:
+        lines = []
+        if cue["original"]:
+            lines.append(colored_line(cue["original"], ASS_ORIGINAL_COLOR))
+        if cue["translation"]:
+            lines.append(colored_line(cue["translation"], ASS_TRANSLATION_COLOR))
+        return r"\N".join(lines)
+
     ass.write_text(header + "\n".join(
-        f"Dialogue: 0,{timestamp(c['start'])},{timestamp(c['end'])},Default,,0,0,0,,"
-        + r"\N".join(escape(t) for t in (c["original"], c["translation"]) if t)
+        f"Dialogue: 0,{timestamp(c['start'])},{timestamp(c['end'])},Default,,0,0,0,,{dialogue_text(c)}"
         for c in groups
     ) + "\n", encoding="utf-8")

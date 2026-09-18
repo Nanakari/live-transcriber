@@ -21,7 +21,7 @@ from .media_assets import default_thumbnail_path
 from .exporters.json_exporter import export_json
 from .exporters.markdown_exporter import export_markdown
 from .exporters.srt_exporter import export_srt
-from .preview import PreviewOptions, create_video_preview
+from .preview import PreviewOptions, create_preview
 from .schemas import TranscriptDocument, TranscriptMeta
 from .transcriber import transcribe_audio
 from .output_layout import ensure_media_subdirs, group_dir_from_artifact_path, media_group_dir, group_name_from_stem
@@ -134,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     
     analyze = subparsers.add_parser("analyze", help="读取 transcript.json，生成双语文本和学习笔记")
     analyze.add_argument("--input", required=True, help="模块一生成的 transcript.json")
-    analyze.add_argument("--provider", default=None, choices=["gemini", "local"], help="LLM provider，默认 gemini")
+    analyze.add_argument("--provider", default=None, choices=["gemini", "local"], metavar="PROVIDER", help=argparse.SUPPRESS)
     analyze.add_argument("--profile", default=None, help="分析 profile，默认 multilingual_study")
     analyze.add_argument("--source-language", default=None, help="源语言，默认从 transcript.json meta 读取")
     analyze.add_argument("--target-language", default=None, help="目标语言，默认 zh")
@@ -144,25 +144,28 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--max-segments-per-chunk", type=int, default=None, help="每个 chunk 最大 segment 数")
     analyze.add_argument("--invalid-json-retries", type=int, default=None, help="JSON 无效时的额外重试次数")
     analyze.add_argument("--limit-chunks", type=int, default=None, help="只处理前 N 个 chunk")
+    analyze.add_argument("--local-concurrency", type=int, default=None, help="Skill 内部本地分析并发数，默认 4")
+    analyze.add_argument("--auto-repair", action=argparse.BooleanOptionalAction, default=None, help="启用高置信度源语言自动修复；原始 ASR 保留")
+    analyze.add_argument("--auto-repair-threshold", type=float, default=None, help="自动修复最低置信度，默认 0.90")
     analyze.add_argument("--dry-run", action="store_true", help="只展示 chunk 切分结果，不调用 API")
     analyze.add_argument("--resume", action="store_true", help="跳过已成功处理的 chunk")
     analyze.add_argument("--debug", action="store_true", help="输出 traceback 和详细日志")
 
-    preview = subparsers.add_parser("preview", help="生成带烧录字幕的 通用视频 静态封面音频预览包")
+    preview = subparsers.add_parser("preview", help="生成音频播放器包；也可选择生成带烧录字幕的视频")
     preview.add_argument("--audio", required=True, help="音频路径，推荐原始音频；也可使用 clean_16k.wav")
     preview.add_argument("--subtitle", required=True, help="translation_zh.srt 路径")
-    preview.add_argument("--cover", help="封面图路径；未提供时尝试从 outputs/thumbnails 自动查找")
-    preview.add_argument("--output-dir", help="输出目录，默认 outputs/previews/RUNID")
+    preview.add_argument("--cover", help="视频模式封面图路径；音频模式不需要封面")
+    preview.add_argument("--output-dir", help="输出目录；默认媒体组的 audio/目录")
     preview.add_argument("--resolution", default="1280x720", help="预览视频分辨率，默认 1280x720")
     preview.add_argument("--subtitle-name", default="live_preview.zh.srt", help="输出中文字幕文件名")
     preview.add_argument("--video-name", default="live_preview.mp4", help="输出视频文件名")
-    preview.add_argument("--mode", default="video", choices=["video", "potplayer"], help="预览模式，默认 video")
+    preview.add_argument("--mode", default="audio", choices=["audio", "video", "potplayer"], help="预览模式，默认 audio；video/potplayer 为可选视频模式")
     preview.add_argument("--debug", action="store_true", help="打印 ffmpeg 命令和错误信息")
 
     pipeline = subparsers.add_parser("pipeline", help="按选择顺序执行转写、分析、预览")
     pipeline.add_argument("--url", help="YouTube 直播回放或普通视频 URL")
     pipeline.add_argument("--input", help="本地音频或视频文件")
-    pipeline.add_argument("--modules", default="transcribe,analyze,preview", help="逗号分隔：transcribe,analyze,preview；默认生成带字幕视频")
+    pipeline.add_argument("--modules", default="transcribe,analyze,preview", help="逗号分隔：transcribe,analyze,preview；默认生成音频播放器包")
     pipeline.add_argument("--transcript", help="跳过转写时使用的 transcript.json")
     pipeline.add_argument("--audio", help="跳过转写时用于预览的音频")
     pipeline.add_argument("--subtitle", help="跳过分析时用于预览的 translation_zh.srt")
@@ -181,13 +184,17 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--remote-components", default="ejs:github", help="Allow yt-dlp remote JS challenge components")
     pipeline.add_argument("--word-timestamps", dest="word_timestamps", action="store_true", default=None, help="启用词级时间戳")
     pipeline.add_argument("--no-word-timestamps", dest="word_timestamps", action="store_false", help="关闭词级时间戳")
-    pipeline.add_argument("--provider", default=None, choices=["gemini", "local"], help="LLM provider")
+    pipeline.add_argument("--provider", default=None, choices=["gemini", "local"], metavar="PROVIDER", help=argparse.SUPPRESS)
     pipeline.add_argument("--profile", default=None, help="分析 profile")
     pipeline.add_argument("--analysis-model", default=None, help="Gemini 模型名称")
     pipeline.add_argument("--analysis-fallback-model", default=None, help="Gemini 备用模型名称")
     pipeline.add_argument("--limit-chunks", type=int, default=None, help="只处理前 N 个 chunk")
+    pipeline.add_argument("--local-concurrency", type=int, default=None, help="Skill 内部本地分析并发数，默认 4")
+    pipeline.add_argument("--auto-repair", action=argparse.BooleanOptionalAction, default=None, help="启用高置信度源语言自动修复；原始 ASR 保留")
+    pipeline.add_argument("--auto-repair-threshold", type=float, default=None, help="自动修复最低置信度，默认 0.90")
     pipeline.add_argument("--resume", action="store_true", help="跳过已成功处理的 chunk")
     pipeline.add_argument("--resolution", default="1280x720", help="预览视频分辨率")
+    pipeline.add_argument("--preview-mode", default="audio", choices=["audio", "video", "potplayer"], help="预览模式，默认 audio；video/potplayer 为可选视频模式")
     pipeline.add_argument("--debug", action="store_true", help="输出 traceback 和详细日志")
 
     web = subparsers.add_parser("web", help="启动多语言影音研析界面")
@@ -280,17 +287,6 @@ def transcribe_task(args: argparse.Namespace) -> dict[str, Path]:
     for warning in warnings:
         _print(f"警告：{warning}")
 
-    prompt, prompt_warnings = build_initial_prompt(
-        language=options["language"],
-        project_root=root,
-        default_terms_path=options["terms_path"],
-        explicit_terms_file=args.terms_file,
-        explicit_initial_prompt=args.initial_prompt,
-        logger=logger,
-    )
-    for warning in prompt_warnings:
-        _print(f"警告：{warning}")
-
     _print("[1/6] 准备输入...")
     if args.input and args.url:
         _print("提示：同时提供了 --input 和 --url，将优先使用本地 --input。")
@@ -348,6 +344,18 @@ def transcribe_task(args: argparse.Namespace) -> dict[str, Path]:
                 logger.write(f"thumbnail={thumbnail}")
         except Exception as exc:
             logger.write(f"thumbnail skipped: {exc}")
+
+    prompt, prompt_warnings = build_initial_prompt(
+        language=options["language"],
+        project_root=root,
+        default_terms_path=options["terms_path"],
+        explicit_terms_file=args.terms_file,
+        explicit_initial_prompt=args.initial_prompt,
+        logger=logger,
+        metadata_hint=title,
+    )
+    for warning in prompt_warnings:
+        _print(f"警告：{warning}")
 
     clean_audio = media_dirs["audio"] / f"{output_stem}_clean_16k.wav"
     _print("[3/6] 转换音频格式...")
@@ -453,30 +461,50 @@ def cleanup_empty_staging(staging_dir: Path) -> None:
         staging_dir.resolve().relative_to(media_root.resolve())
     except ValueError:
         return
-    current = staging_dir
-    while current != media_root and current.exists():
+    if not staging_dir.exists():
+        return
+
+    # prepare_output_paths creates empty child directories before the first
+    # download.  Remove empty descendants first, then walk back to media_root;
+    # never touch a non-empty failed staging directory.
+    candidates = sorted(
+        (path for path in staging_dir.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for candidate in [*candidates, staging_dir]:
+        if candidate == media_root or not candidate.exists():
+            continue
         try:
-            current.rmdir()
+            candidate.rmdir()
         except OSError:
-            break
-        current = current.parent
+            continue
 
 
 def analyze_task(args: argparse.Namespace) -> dict[str, Any]:
     config = load_config()
     analysis_config = config.get("analysis", {})
     input_file = Path(args.input).expanduser()
+    provider = args.provider or analysis_config.get("provider", "gemini")
+    if provider == "local":
+        if os.environ.get("LIVE_TRANSCRIBER_SKILL_MODE") != "1":
+            raise AppError("local provider 是 Skill 内部能力，请通过 $live-transcriber 调用。")
+        model = args.model or analysis_config.get("local_model") or "codex-default"
+        fallback_model = args.fallback_model or ""
+    else:
+        model = args.model or analysis_config.get("model", "gemini-3.5-flash-lite")
+        fallback_model = args.fallback_model or analysis_config.get("fallback_model", "gemini-3.1-flash-lite")
     options = AnalyzeOptions(
         **{name: getattr(args, name, None) if getattr(args, name, None) is not None
            else config.get("features", {}).get(name, name != "character_profile")
            for name in ("character_profile", "summary", "study_notes")},
         input_file=input_file,
-        provider=args.provider or analysis_config.get("provider", "gemini"),
+        provider=provider,
         profile=args.profile or analysis_config.get("profile", "multilingual_study"),
         source_language=args.source_language or analysis_config.get("source_language", ""),
         target_language=args.target_language or analysis_config.get("target_language", "zh"),
-        model=args.model or analysis_config.get("model", "gemini-3.5-flash-lite"),
-        fallback_model=args.fallback_model or analysis_config.get("fallback_model", "gemini-3.1-flash-lite"),
+        model=model,
+        fallback_model=fallback_model,
         api_key_env=analysis_config.get("api_key_env", "GEMINI_API_KEY"),
         chunk_minutes=float(args.chunk_minutes or analysis_config.get("chunk_minutes", 3)),
         max_segments_per_chunk=int(args.max_segments_per_chunk or analysis_config.get("max_segments_per_chunk", 40)),
@@ -495,6 +523,25 @@ def analyze_task(args: argparse.Namespace) -> dict[str, Any]:
         dry_run=args.dry_run,
         resume=args.resume,
         debug=args.debug,
+        local_command=analysis_config.get("local_command", "codex"),
+        local_timeout_seconds=float(analysis_config.get("local_timeout_seconds", 900)),
+        local_reasoning_effort=str(analysis_config.get("local_reasoning_effort", "medium") or "").strip(),
+        local_ignore_user_config=bool(analysis_config.get("local_ignore_user_config", True)),
+        local_concurrency=max(1, int(
+            getattr(args, "local_concurrency", None)
+            if getattr(args, "local_concurrency", None) is not None
+            else analysis_config.get("local_concurrency", 4)
+        )),
+        auto_repair_enabled=bool(
+            getattr(args, "auto_repair", None)
+            if getattr(args, "auto_repair", None) is not None
+            else analysis_config.get("auto_repair_enabled", True)
+        ),
+        auto_repair_threshold=float(
+            getattr(args, "auto_repair_threshold", None)
+            if getattr(args, "auto_repair_threshold", None) is not None
+            else analysis_config.get("auto_repair_threshold", 0.90)
+        ),
     )
     result = run_analysis(options)
     _print("\n分析完成：" if not result.get("dry_run") else "\nDry-run 完成：")
@@ -509,6 +556,16 @@ def analyze_task(args: argparse.Namespace) -> dict[str, Any]:
                 f"- 警告：{fallback_lines} 条字幕自动补译后仍缺少中文翻译；"
                 "已用带标记的原文占位，时间轴保持完整。"
             )
+        review_items = result["document"].meta.review_items
+        if review_items:
+            _print(
+                f"- 提示：发现 {review_items} 条人工复查项，结果已生成但不应视为无风险完成。"
+            )
+        auto_repaired_lines = result["document"].meta.auto_repaired_lines
+        if auto_repaired_lines:
+            _print(
+                f"- 高置信度自动修复：已采用 {auto_repaired_lines} 条；原文和修复日志均已保留。"
+            )
         for path in result.get("output_paths", {}).values():
             _print(f"- {path}")
     result["exit_code"] = 0
@@ -519,8 +576,19 @@ def analyze_task(args: argparse.Namespace) -> dict[str, Any]:
             result["exit_code"] = 1
         elif meta.failed_chunks or meta.fallback_lines:
             result["exit_code"] = 2
-        print("ANALYSIS_STATUS " + json.dumps({"failed_chunks": meta.failed_chunks,
-              "fallback_lines": meta.fallback_lines, "total_lines": total_lines}), flush=True)
+        print("ANALYSIS_STATUS " + json.dumps({
+            "quality_status": meta.quality_status,
+            "failed_chunks": meta.failed_chunks,
+            "fallback_lines": meta.fallback_lines,
+            "review_items": meta.review_items,
+            "review_segments": meta.review_segments,
+            "auto_repair_enabled": meta.auto_repair_enabled,
+            "auto_repair_threshold": meta.auto_repair_threshold,
+            "auto_repaired_lines": meta.auto_repaired_lines,
+            "unresolved_review_items": meta.unresolved_review_items,
+            "video_summary_error": result["document"].video_summary_error,
+            "total_lines": total_lines,
+        }, ensure_ascii=False), flush=True)
     print("ARTIFACT_RESULT " + json.dumps({"output_dir": str(result["output_dir"])}), flush=True)
     return result
 
@@ -544,15 +612,22 @@ def _create_preview(args: argparse.Namespace) -> dict[str, Path]:
         resolution=args.resolution,
         subtitle_name=args.subtitle_name,
         video_name=args.video_name,
-        mode=args.mode,
+        mode=getattr(args, "mode", "audio"),
         debug=args.debug,
     )
-    return create_video_preview(options)
+    return create_preview(options)
 
 
 def _print_preview_result(result: dict[str, Path]) -> None:
-    _print("\n通用视频 预览包已生成：")
+    _print("\n媒体预览包已生成：")
+    seen: set[str] = set()
     for path in result.values():
+        if not isinstance(path, Path):
+            continue
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
         _print(f"- {path}")
 
 
@@ -627,6 +702,9 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             fallback_model=args.analysis_fallback_model,
             chunk_minutes=None,
             max_segments_per_chunk=None,
+            local_concurrency=args.local_concurrency,
+            auto_repair=args.auto_repair,
+            auto_repair_threshold=args.auto_repair_threshold,
             limit_chunks=args.limit_chunks,
             dry_run=False,
             resume=args.resume,
@@ -658,10 +736,11 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             resolution=args.resolution,
             subtitle_name="live_preview.zh.srt",
             video_name="live_preview.mp4",
-            mode="video",
+            mode=args.preview_mode,
             debug=args.debug,
         )
-        _print("[pipeline] 开始模块三：通用视频 预览")
+        preview_label = "音频播放器" if args.preview_mode == "audio" else "通用视频预览"
+        _print(f"[pipeline] 开始模块三：{preview_label}")
         preview_result = _create_preview(preview_args)
         _print_preview_result(preview_result)
 
@@ -834,7 +913,3 @@ def run() -> None:
         if getattr(args, "debug", False):
             traceback.print_exc()
         raise SystemExit(1)
-
-
-
-

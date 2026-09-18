@@ -153,7 +153,9 @@ def start_analyze(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         _require_analysis_key(api_key)
     command = cli_command_prefix() + ["analyze", "--input", input_file]
     _append_feature_flags(command, payload)
-    _append_optional(command, "--provider", payload.get("provider") or "gemini")
+    # The public web flow is intentionally API-backed.  The local Codex
+    # provider is available only through the Skill wrapper and its gate.
+    _append_optional(command, "--provider", "gemini")
     _append_optional(command, "--profile", payload.get("profile") or "multilingual_study")
     _append_optional(command, "--model", payload.get("model"))
     _append_optional(command, "--fallback-model", payload.get("fallback_model"))
@@ -217,7 +219,8 @@ def start_pipeline(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     elif word_timestamps is False:
         command.append("--no-word-timestamps")
 
-    _append_optional(command, "--provider", payload.get("provider") or "gemini")
+    # Never allow a browser payload to enter the Skill-internal local route.
+    _append_optional(command, "--provider", "gemini")
     _append_optional(command, "--profile", payload.get("profile") or "multilingual_study")
     _append_optional(command, "--analysis-model", payload.get("analysis_model"))
     _append_optional(command, "--analysis-fallback-model", payload.get("analysis_fallback_model"))
@@ -228,6 +231,7 @@ def start_pipeline(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         command.append("--resume")
     _append_optional(command, "--cover", payload.get("cover"))
     _append_optional(command, "--resolution", payload.get("resolution") or "1280x720")
+    _append_optional(command, "--preview-mode", payload.get("preview_mode") or "audio")
     if payload.get("debug"):
         command.append("--debug")
 
@@ -251,20 +255,25 @@ def _analysis_environment(payload: dict[str, Any], api_key: str) -> dict[str, st
 def start_preview(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     audio = str(payload.get("audio") or "").strip()
     subtitle = str(payload.get("subtitle") or "").strip()
+    mode = str(payload.get("mode") or "audio").strip().lower()
+    if mode not in {"audio", "video", "potplayer"}:
+        raise HTTPException(status_code=422, detail="预览模式必须是 audio、video 或 potplayer。")
     cover = str(payload.get("cover") or "").strip()
     artifact_run_id = str(payload.get("artifact_run_id") or "").strip()
     if not audio:
         raise HTTPException(status_code=400, detail="请选择音频文件。")
     if not subtitle:
         raise HTTPException(status_code=400, detail="请选择 translation_zh.srt。")
-    if not cover:
+    if mode != "audio" and not cover:
         cover = _default_cover_for_preview(subtitle, audio)
-    if not cover:
+    if mode != "audio" and not cover:
         raise HTTPException(status_code=400, detail="请选择封面图，或先放入当前媒体文件夹的 thumbnails。")
     output_dir = str(payload.get("output_dir") or "").strip()
     if not output_dir:
-        output_dir = _default_preview_output_dir(artifact_run_id, subtitle, audio)
-    command = cli_command_prefix() + ["preview", "--audio", audio, "--subtitle", subtitle, "--cover", cover]
+        output_dir = _default_preview_output_dir(artifact_run_id, subtitle, audio, mode=mode)
+    command = cli_command_prefix() + ["preview", "--audio", audio, "--subtitle", subtitle, "--mode", mode]
+    if cover:
+        command += ["--cover", cover]
     _append_optional(command, "--output-dir", output_dir)
     _append_optional(command, "--resolution", payload.get("resolution") or "1280x720")
     if payload.get("debug"):
@@ -304,7 +313,7 @@ def download_result(path: str = Query(...)):
         target.relative_to((project_root() / "outputs").resolve())
     except ValueError:
         raise HTTPException(status_code=403, detail="只能下载处理结果。")
-    if target.suffix.lower() not in {".txt", ".md", ".json", ".srt", ".log", ".yaml", ".yml", ".mp4"}:
+    if target.suffix.lower() not in {".txt", ".md", ".json", ".srt", ".log", ".yaml", ".yml", ".mp4", ".pyw", ".cmd"}:
         raise HTTPException(status_code=403, detail="该文件类型不能下载。")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="文件不存在。")
@@ -387,15 +396,15 @@ def open_preview_in_potplayer(payload: dict[str, Any] = Body(...)) -> dict[str, 
 
 
 
-def _default_preview_output_dir(artifact_run_id: str, subtitle: str, audio: str) -> str:
+def _default_preview_output_dir(artifact_run_id: str, subtitle: str, audio: str, *, mode: str = "audio") -> str:
     run_id = artifact_run_id or _transcript_run_id_from_analysis_file(Path(subtitle)) or _run_id_from_audio_path(Path(audio))
     group_dir = group_dir_from_artifact_path(Path(subtitle)) or group_dir_from_artifact_path(Path(audio))
     if group_dir:
-        return str((group_dir / "video").resolve())
+        return str((group_dir / ("audio" if mode == "audio" else "video")).resolve())
     safe = _safe_run_id(run_id)
     if not safe:
         return ""
-    return str((project_root() / "outputs" / "previews" / safe).resolve())
+    return str((project_root() / "outputs" / "previews" / safe / ("audio" if mode == "audio" else "video")).resolve())
 
 
 def _default_cover_for_preview(subtitle: str, audio: str) -> str:
@@ -545,10 +554,21 @@ def _latest_analysis(base: Path) -> dict[str, Any] | None:
     }
 
 
+def _is_preview_package(path: Path) -> bool:
+    return any(
+        (path / name).exists()
+        for name in (
+            "live_preview.mp4",
+            "audio_subtitle_player.pyw",
+            "run_audio_subtitle_player.cmd",
+        )
+    )
+
+
 def _latest_preview(base: Path) -> dict[str, Any] | None:
     if not base.exists():
         return None
-    candidates = [path for path in base.rglob("*") if path.is_dir() and (path / "live_preview.mp4").exists()]
+    candidates = [path for path in base.rglob("*") if path.is_dir() and _is_preview_package(path)]
     if not candidates:
         return None
     run = max(candidates, key=lambda path: path.stat().st_mtime)
@@ -610,7 +630,7 @@ def _artifact_sets(root: Path) -> list[dict[str, Any]]:
         if not previews_dir.exists():
             continue
         for run in previews_dir.rglob("*"):
-            if not run.is_dir() or not (run / "live_preview.mp4").exists():
+            if not run.is_dir() or not _is_preview_package(run):
                 continue
             transcript_run_id = _preview_transcript_run_id(run, analysis_by_transcript)
             item = _preview_result(run)
@@ -908,8 +928,10 @@ def _latest_analysis_result(run: Path) -> dict[str, Any] | None:
 
 
 def _preview_result(run: Path) -> dict[str, Any] | None:
-    if not (run / "live_preview.mp4").exists():
+    if not _is_preview_package(run):
         return None
+    video_mode = (run / "live_preview.mp4").exists()
+    audio_dir = run if (run / "audio_subtitle_player.pyw").exists() or (run / "run_audio_subtitle_player.cmd").exists() else run.parent / "audio"
     names = [
         "live_preview.mp4",
         "display.bilingual.srt",
@@ -918,18 +940,38 @@ def _preview_result(run: Path) -> dict[str, Any] | None:
         "live_preview.srt",
         "live_preview.zh.srt",
         "live_preview.ja.srt",
+        "floating_subtitle_overlay.pyw",
+        "run_floating_subtitle_overlay.cmd",
+        "audio_subtitle_player.pyw",
+        "run_audio_subtitle_player.cmd",
+        "audio_mode.bilingual.srt",
         "vocabulary.md",
         "grammar.md",
         "cover.jpg",
         "README_play.txt",
         "run.log",
     ]
+    files = {name: _file_item(path) for name in names
+             if (path := _first_existing(run, [name, "subtitles/" + name, "assets/" + name]))}
+    for name in (
+        "audio_subtitle_player.pyw",
+        "run_audio_subtitle_player.cmd",
+        "audio_mode.bilingual.srt",
+        "README_play.txt",
+    ):
+        path = audio_dir / name
+        if path.exists():
+            files[name] = _file_item(path)
+    if not video_mode:
+        files.pop("README_play.txt", None)
+        readme = audio_dir / "README_play.txt"
+        if readme.exists():
+            files["README_play.txt"] = _file_item(readme)
     return {
         "name": run.name,
         "path": str(run.resolve()),
         "modified": datetime_from_timestamp(run.stat().st_mtime),
-        "files": {name: _file_item(path) for name in names
-                  if (path := _first_existing(run, [name, "subtitles/" + name, "assets/" + name]))},
+        "files": files,
     }
 
 

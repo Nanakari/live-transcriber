@@ -14,6 +14,7 @@ from .schemas import (
     ReviewItem,
     VocabularyItem,
 )
+from .repairs import effective_original, write_repair_log
 
 
 def export_analysis_json(document: AnalysisDocument, output_path: Path) -> None:
@@ -55,6 +56,35 @@ def export_review_markdown(document: AnalysisDocument, output_path: Path) -> Non
     lines = ["# 人工复查清单", ""]
     lines.extend(_review_lines(document))
     output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def export_repaired_transcript_srt(document: AnalysisDocument, output_path: Path) -> None:
+    """Export source-language subtitles using only accepted repairs."""
+    lines = [
+        line
+        for chunk in sorted(document.chunks, key=lambda item: item.start)
+        for line in sorted(chunk.bilingual_lines, key=lambda item: item.start)
+    ]
+    blocks = []
+    for index, line in enumerate(lines, start=1):
+        text = effective_original(line) or line.original
+        blocks.append(
+            f"{index}\n{format_srt_timestamp(line.start)} --> {format_srt_timestamp(line.end)}\n{text}"
+        )
+    output_path.write_text("\n\n".join(blocks) + ("\n" if blocks else ""), encoding="utf-8")
+
+
+def export_repaired_transcript_markdown(document: AnalysisDocument, output_path: Path) -> None:
+    lines = ["# 修复后原文转写", "", "> 原始 ASR 转录保留在 transcripts/ 目录；本文件只采用已通过阈值的自动修复。", ""]
+    for chunk in sorted(document.chunks, key=lambda item: item.start):
+        for line in sorted(chunk.bilingual_lines, key=lambda item: item.start):
+            lines.extend([
+                f"## {format_srt_timestamp(line.start)} - {format_srt_timestamp(line.end)}",
+                "",
+                effective_original(line) or line.original,
+                "",
+            ])
+    output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
 def export_combined_study_markdown(document: AnalysisDocument, output_path: Path) -> None:
@@ -200,7 +230,17 @@ def _review_lines(document: AnalysisDocument) -> list[str]:
             [
                 f"## {chunk_id} {time_text}".rstrip(),
                 "",
-                f"- 原文：{item.original or '未提供'}",
+                f"- 原文（ASR）：{item.original or '未提供'}",
+                *(
+                    [
+                        f"- 修复候选：{item.corrected_original}",
+                        f"- 修复置信度：{item.repair_confidence:.2f}",
+                        f"- 修复状态：{'已自动采用' if item.auto_repaired else '待人工确认'}",
+                        f"- 修复依据：{item.repair_reason}",
+                    ]
+                    if item.corrected_original.strip()
+                    else []
+                ),
                 f"- 原因：{item.reason_zh}",
                 f"- 类型：{item.risk_type or '未分类'}",
                 "",
@@ -280,7 +320,7 @@ def _reading_paragraphs(document: AnalysisDocument) -> list[tuple[float, float, 
             (
                 current[0].start,
                 current[-1].end,
-                _join_spoken_text(line.original for line in current),
+                _join_spoken_text(effective_original(line) for line in current),
                 _join_spoken_text(line.translation_zh for line in current),
             )
         )
@@ -428,17 +468,26 @@ def _append_profile_list(lines: list[str], title: str, values: list[str]) -> Non
     lines.append("")
 
 
-def export_all(document: AnalysisDocument, output_dir: Path) -> dict[str, Path]:
+def export_all(
+    document: AnalysisDocument,
+    output_dir: Path,
+) -> dict[str, Path]:
     paths = {
         "analysis_json": output_dir / "analysis.json",
         "bilingual_md": output_dir / "bilingual.md",
         "translation_srt": output_dir / "translation_zh.srt",
         "review_md": output_dir / "review.md",
+        "repaired_transcript_srt": output_dir / "repaired_transcript.srt",
+        "repaired_transcript_md": output_dir / "repaired_transcript.md",
+        "repair_log": output_dir / "repair_log.json",
     }
     export_analysis_json(document, paths["analysis_json"])
     export_bilingual_markdown(document, paths["bilingual_md"])
     export_translation_srt(document, paths["translation_srt"])
     export_review_markdown(document, paths["review_md"])
+    export_repaired_transcript_srt(document, paths["repaired_transcript_srt"])
+    export_repaired_transcript_markdown(document, paths["repaired_transcript_md"])
+    write_repair_log(document, paths["repair_log"])
     if document.meta.study_notes:
         for key, name, exporter in (
             ("vocabulary_md", "vocabulary.md", export_vocabulary_markdown),

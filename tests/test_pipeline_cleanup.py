@@ -64,6 +64,17 @@ def test_pipeline_cleanup_removes_only_generated_clean_wav(
     assert other_wav.exists()
 
 
+def test_cleanup_empty_staging_removes_empty_descendants(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LIVE_TRANSCRIBER_HOME", str(tmp_path))
+    staging = tmp_path / "outputs" / "media" / "_staging" / "run-1"
+    for name in ("audio", "logs", "transcripts"):
+        (staging / name).mkdir(parents=True)
+
+    cli.cleanup_empty_staging(staging)
+
+    assert not staging.exists()
+
+
 def test_pipeline_preserves_source_m4a_even_with_legacy_cleanup_setting(monkeypatch, tmp_path):
     group = tmp_path / "media" / "sample"
     audio_dir = group / "audio"

@@ -7,8 +7,24 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .subtitles import write_display_subtitles
+from .subtitles import (
+    ASS_ORIGINAL_COLOR,
+    ASS_OUTLINE_COLOR,
+    ASS_TRANSPARENT_COLOR,
+    write_display_subtitles,
+)
 from .config import project_root, tool_path
+from .floating_overlay import (
+    AUDIO_MODE_SUBTITLE_FILENAME,
+    AUDIO_PLAYER_LAUNCHER_FILENAME,
+    AUDIO_PLAYER_FILENAME,
+    OVERLAY_LAUNCHER_FILENAME,
+    OVERLAY_FILENAME,
+    write_audio_subtitle_player,
+    write_floating_subtitle_overlay,
+    write_overlay_launcher,
+)
+from .analysis.repairs import effective_original
 from .media_assets import default_thumbnail_path
 from .output_layout import ensure_media_subdirs, group_dir_from_artifact_path, write_media_index
 from .utils import AppError, RunLogger, command_exists, format_srt_timestamp, generate_run_id, run_subprocess
@@ -16,8 +32,8 @@ from .utils import AppError, RunLogger, command_exists, format_srt_timestamp, ge
 
 SUBTITLE_FORCE_STYLE = (
     "FontName=Microsoft YaHei,FontSize=26,Bold=1,"
-    "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-    "BackColour=&H80000000,BorderStyle=3,Outline=1,Shadow=0,"
+    f"PrimaryColour={ASS_ORIGINAL_COLOR},OutlineColour={ASS_OUTLINE_COLOR},"
+    f"BackColour={ASS_TRANSPARENT_COLOR},BorderStyle=1,Outline=2,Shadow=1,"
     "Alignment=2,MarginV=36"
 )
 
@@ -33,6 +49,99 @@ class PreviewOptions:
     video_name: str
     mode: str
     debug: bool = False
+    floating_overlay_name: str = OVERLAY_FILENAME
+
+
+def create_preview(options: PreviewOptions) -> dict[str, Path]:
+    """Create the selected preview package; audio is the default lightweight mode."""
+    if options.mode == "audio":
+        return create_audio_preview(options)
+    return create_video_preview(options)
+
+
+def create_audio_preview(options: PreviewOptions) -> dict[str, Path]:
+    """Create an audio-only player package without encoding a video file."""
+    if options.mode != "audio":
+        raise AppError("音频预览需要 --mode audio。")
+
+    audio = options.audio.expanduser()
+    subtitle = options.subtitle.expanduser()
+    if not audio.exists() or not audio.is_file():
+        raise AppError(f"音频文件不存在或不可读取：{audio}")
+    if not subtitle.exists() or not subtitle.is_file():
+        raise AppError(f"字幕文件不存在或不可读取：{subtitle}")
+
+    run_id = generate_run_id()
+    group = group_dir_from_artifact_path(subtitle) or group_dir_from_artifact_path(audio)
+    if options.output_dir:
+        output_dir = options.output_dir.expanduser()
+    elif group:
+        output_dir = group / "audio"
+    else:
+        output_dir = project_root() / "outputs" / "previews" / run_id / "audio"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    support_dir = output_dir / "assets"
+    subtitle_dir = output_dir / "subtitles"
+    support_dir.mkdir(exist_ok=True)
+    subtitle_dir.mkdir(exist_ok=True)
+    logger = RunLogger(support_dir / "run.log", debug=options.debug)
+
+    subtitle_path = subtitle_dir / options.subtitle_name
+    shutil.copy2(subtitle, subtitle_path)
+    ja_subtitle = maybe_copy_original_subtitle(subtitle, subtitle_dir)
+    bilingual_subtitle = maybe_write_bilingual_subtitle(subtitle_path, ja_subtitle, subtitle_dir)
+    original_blocks = read_srt_blocks(ja_subtitle) if ja_subtitle else []
+    original_lookup = build_srt_lookup(original_blocks)
+    cues = []
+    for block in read_srt_blocks(subtitle_path):
+        original = match_srt_block(block, original_lookup)
+        cues.append({
+            "start": block["start"],
+            "end": block["end"],
+            "original": original["text"] if original else "",
+            "translation": block["text"],
+        })
+
+    audio_mode_subtitle = output_dir / AUDIO_MODE_SUBTITLE_FILENAME
+    audio_mode_ass = support_dir / "audio_mode.bilingual.ass"
+    write_display_subtitles(cues, audio_mode_subtitle, audio_mode_ass)
+    audio_player_path = output_dir / AUDIO_PLAYER_FILENAME
+    write_audio_subtitle_player(audio_player_path, audio, audio_mode_subtitle)
+    audio_player_launcher_path = output_dir / AUDIO_PLAYER_LAUNCHER_FILENAME
+    write_overlay_launcher(audio_player_launcher_path, audio_player_path.name)
+    audio_readme_path = output_dir / "README_play.txt"
+    write_audio_readme(
+        audio_readme_path,
+        audio.name,
+        audio_player_path.name,
+        audio_mode_subtitle.name,
+        audio_player_launcher_path.name,
+    )
+    manifest_path = support_dir / "manifest.json"
+    manifest_path.write_text(json.dumps({
+        "mode": "audio",
+        "transcript_run_id": infer_transcript_run_id_from_analysis(subtitle),
+        "audio": str(audio.resolve()),
+        "analysis_subtitle": str(subtitle.resolve()),
+        "audio_player": str(audio_player_path.resolve()),
+        "audio_launcher": str(audio_player_launcher_path.resolve()),
+        "audio_subtitle": str(audio_mode_subtitle.resolve()),
+        "audio_controls": ["play_pause", "timeline_seek", "seek_minus_10", "seek_plus_10", "keyboard_seek"],
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    if group:
+        write_media_index(group)
+    return {
+        "output_dir": output_dir,
+        "audio": audio,
+        "subtitle": subtitle_path,
+        "bilingual_subtitle": bilingual_subtitle,
+        "audio_subtitle": audio_mode_subtitle,
+        "readme": audio_readme_path,
+        "audio_player": audio_player_path,
+        "audio_launcher": audio_player_launcher_path,
+        "audio_readme": audio_readme_path,
+        "log": support_dir / "run.log",
+    }
 
 
 def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
@@ -95,6 +204,27 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
                      "original": original["text"] if original else "",
                      "translation": block["text"]})
     write_display_subtitles(cues, display_srt, burn_subtitle)
+    floating_overlay_path = output_dir / options.floating_overlay_name
+    write_floating_subtitle_overlay(floating_overlay_path, display_srt)
+    floating_overlay_launcher_path = output_dir / OVERLAY_LAUNCHER_FILENAME
+    write_overlay_launcher(floating_overlay_launcher_path, floating_overlay_path.name)
+    group = group_dir_from_artifact_path(subtitle) or group_dir_from_artifact_path(audio)
+    audio_output_dir = (group / "audio") if group else (output_dir / "audio")
+    audio_output_dir.mkdir(parents=True, exist_ok=True)
+    audio_mode_subtitle = audio_output_dir / AUDIO_MODE_SUBTITLE_FILENAME
+    shutil.copy2(display_srt, audio_mode_subtitle)
+    audio_player_path = audio_output_dir / AUDIO_PLAYER_FILENAME
+    write_audio_subtitle_player(audio_player_path, audio, audio_mode_subtitle)
+    audio_player_launcher_path = audio_output_dir / AUDIO_PLAYER_LAUNCHER_FILENAME
+    write_overlay_launcher(audio_player_launcher_path, audio_player_path.name)
+    audio_readme_path = audio_output_dir / "README_play.txt"
+    write_audio_readme(
+        audio_readme_path,
+        audio.name,
+        audio_player_path.name,
+        audio_mode_subtitle.name,
+        audio_player_launcher_path.name,
+    )
     build_preview_video(
         audio=audio,
         cover=cover_path,
@@ -106,12 +236,24 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
     )
     # Only remove the legacy auto-loaded subtitle after the burned video succeeds.
     auto_subtitle_path.unlink(missing_ok=True)
-    write_readme(readme_path, video_path.name, "subtitles/" + subtitle_path.name)
+    write_readme(
+        readme_path,
+        video_path.name,
+        "subtitles/" + subtitle_path.name,
+        floating_overlay_path.name,
+        audio_player_path=audio_player_path,
+        floating_launcher_name=floating_overlay_launcher_path.name,
+        audio_launcher_path=audio_player_launcher_path,
+    )
     (support_dir / "manifest.json").write_text(json.dumps({
         "transcript_run_id": infer_transcript_run_id_from_analysis(subtitle),
         "audio": str(audio.resolve()), "analysis_subtitle": str(subtitle.resolve()),
+        "floating_overlay": str(floating_overlay_path.resolve()),
+        "floating_overlay_launcher": str(floating_overlay_launcher_path.resolve()),
+        "audio_player": str(audio_player_path.resolve()),
+        "audio_launcher": str(audio_player_launcher_path.resolve()),
+        "audio_subtitle": str(audio_mode_subtitle.resolve()),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    group = group_dir_from_artifact_path(subtitle) or group_dir_from_artifact_path(audio)
     if group:
         write_media_index(group)
     return {
@@ -122,6 +264,12 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
         "display_subtitle": display_srt,
         "cover": cover_path,
         "readme": readme_path,
+        "floating_overlay": floating_overlay_path,
+        "floating_overlay_launcher": floating_overlay_launcher_path,
+        "audio_player": audio_player_path,
+        "audio_launcher": audio_player_launcher_path,
+        "audio_subtitle": audio_mode_subtitle,
+        "audio_readme": audio_readme_path,
         "log": support_dir / "run.log",
     }
 
@@ -320,6 +468,13 @@ def parse_media_duration(text: str) -> float | None:
 
 
 def maybe_copy_original_subtitle(chinese_subtitle: Path, output_dir: Path) -> Path | None:
+    repaired = chinese_subtitle.parent / "repaired_transcript.srt"
+    if repaired.exists() and repaired.is_file():
+        target = output_dir / "live_preview.ja.srt"
+        if repaired.resolve() != chinese_subtitle.resolve():
+            shutil.copy2(repaired, target)
+            return target
+
     transcript_dirs: list[Path] = []
     group_dir = group_dir_from_artifact_path(chinese_subtitle)
     if group_dir:
@@ -421,7 +576,10 @@ def maybe_write_study_subtitle(chinese_subtitle: Path, japanese_subtitle: Path |
         zh_block = zh_blocks[index] if index < len(zh_blocks) else {}
         ja_block = match_srt_block(zh_block, ja_lookup) if zh_block else None
         time_text = zh_block.get("time") or f"{format_srt_timestamp(float(line.get('start', 0)))} --> {format_srt_timestamp(float(line.get('end', 0)))}"
-        ja_text = compact_text((ja_block or {}).get("text") or line.get("original", ""), 90)
+        ja_text = compact_text(
+            effective_original(line) if line else (ja_block or {}).get("text", ""),
+            90,
+        )
         zh_text = compact_text(zh_block.get("text") or line.get("translation_zh", ""), 90)
         study_lines = [value for value in (ja_text, zh_text) if value]
         notes = study_notes_for_line(chunk, line, ja_text)
@@ -455,7 +613,7 @@ def find_related_analysis_json(chinese_subtitle: Path) -> Path | None:
 
 
 def study_notes_for_line(chunk: dict, line: dict, ja_text: str) -> list[str]:
-    original = str(line.get("original") or ja_text or "")
+    original = effective_original(line) or ja_text or ""
     vocab_items = rank_items(
         original,
         ja_text,
@@ -611,8 +769,12 @@ def write_readme(
     path: Path,
     video_name: str,
     subtitle_name: str,
+    floating_overlay_name: str | None = OVERLAY_FILENAME,
+    audio_player_path: Path | None = None,
     learning_notes: dict[str, Path] | None = None,
     study_subtitle: Path | None = None,
+    floating_launcher_name: str | None = None,
+    audio_launcher_path: Path | None = None,
 ) -> None:
     content = f"""字幕视频使用说明
 
@@ -623,12 +785,68 @@ def write_readme(
 - {video_name}：最终视频（封面背景、音频、日中字幕）。
 - subtitles/：细分原文／译文字幕，以及按连续语音合并的 display.bilingual.srt / .ass。
 - assets/：封面、生成日志与关联信息。
+"""
+    if floating_overlay_name:
+        content += f"""
+悬挂字幕框：
+- {floating_launcher_name or floating_overlay_name}：直接点击启动独立的 Windows Tkinter 悬挂字幕框，样式对齐 Gemini Live Translator 的 compact 两行模式。
+  从视频时间轴开头显示；若视频从第 N 秒开始播放，可用 python {floating_overlay_name} --start N。
+- {floating_overlay_name}：播放器脚本本体；如果系统已关联 Python，也可以直接双击。
+  默认读取 subtitles/display.bilingual.srt，可用 --srt 指定其他字幕文件。
+"""
+    if audio_player_path:
+        audio_relative = Path("..") / "audio" / audio_player_path.name
+        audio_subtitle_relative = Path("..") / "audio" / AUDIO_MODE_SUBTITLE_FILENAME
+        content += f"""
+音频模式：
+- {(audio_relative.parent / audio_launcher_path.name).as_posix() if audio_launcher_path else audio_relative.as_posix()}：直接点击启动独立音频 + 下方悬挂双语字幕框，不打开视频画面，也不依赖 PotPlayer/VLC。
+- {audio_relative.as_posix()}：播放器脚本本体；音频文件和字幕位于 ../audio/。
+- {audio_subtitle_relative.as_posix()}：音频模式使用的双语时间轴字幕文件。
+  播放器支持播放/暂停、进度条拖动、-10s/+10s 快进后退；空格暂停，方向键快进/后退。
+"""
+    content += """
 
 显示字幕按连续语音合并，最多约9秒一组，明显停顿处断开；时间相对所选音频片段。
 需要改字幕时，请编辑字幕并重新生成视频，播放器的字幕偏移不能修改已烧录的画面。
 总结与学习笔记在同一媒体任务的 analysis/ 中，源音频保留在 audio/ 中。
 """
     path.write_text(content, encoding="utf-8")
+
+
+def write_audio_readme(
+    path: Path,
+    audio_name: str,
+    player_name: str,
+    subtitle_name: str,
+    launcher_name: str | None = None,
+) -> None:
+    path.write_text(
+        f"""音频 + 悬挂字幕使用说明
+
+直接双击 {launcher_name or player_name}，程序会播放 {audio_name}，同时在屏幕下方显示独立的双语悬挂字幕框。
+不打开视频画面，也不依赖 PotPlayer/VLC；音频由隐藏的 ffplay 音频引擎播放。
+
+文件：
+- {audio_name}：源音频。
+- {subtitle_name}：音频模式双语时间轴。
+- {launcher_name or player_name}：Windows 直接启动入口，不要求系统关联 .pyw 文件。
+- {player_name}：独立 Python 图形窗口播放器。
+
+播放器控制：
+- 播放/暂停按钮：暂停或继续音频。
+- 进度条：拖动到任意位置后跳转。
+- -10s / +10s：后退或快进 10 秒。
+- 空格：播放/暂停；左右方向键：后退/快进 5 秒；Shift+左右方向键：后退/快进 30 秒。
+
+可选命令：
+- python {player_name} --start 125：从第 125 秒开始。
+- python {player_name} --srt 其他字幕.srt：改用其他时间轴。
+- python {player_name} --ffplay D:\\path\\ffplay.exe：指定 ffplay 路径。
+
+空白字幕时段是原始时间轴中的无语音区间，音频仍会继续播放。
+""",
+        encoding="utf-8",
+    )
 
 
 # Keep older CLI integrations working.

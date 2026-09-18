@@ -1,8 +1,8 @@
 # 影音转写
 
-本机运行的影音处理工具：导入视频链接或本地文件，生成**原文转写、中文翻译、总结和学习笔记**。完整处理默认生成封面背景的双语字幕视频；人物档案可通过旧版界面或 CLI 按需生成。
+本机运行的影音处理工具：导入视频链接或本地文件，生成**原文转写、中文翻译、总结和学习笔记**。完整处理默认生成音频播放器和对齐 Gemini Live Translator compact 样式的底部悬挂字幕框；视频字幕预览改为按需生成；人物档案可通过旧版界面或 CLI 按需生成。
 
-语音识别使用 faster-whisper，在本机运行。翻译、总结和学习笔记使用 Gemini，会将转写文本发送至 Gemini。没有 API Key 也可以仅转写。
+语音识别使用 faster-whisper，在本机运行。默认 Web/API 流程的翻译、总结和学习笔记使用 Gemini；只有通过 `live-transcriber` Skill 调用时，才会进入受门控的本地 Codex provider。没有 Gemini API Key 也可以仅转写。
 
 ## 下载运行（Windows）
 
@@ -46,10 +46,10 @@ Linux/macOS 可安装 `requirements.txt` 并通过 CLI 运行，ffmpeg 和 JavaS
 
 ## 简洁的处理流程
 
-- 首页只有一个媒体入口，默认生成转写、翻译、总结、学习笔记及字幕视频；源语言默认自动识别。
+- 首页只有一个媒体入口，默认生成转写、翻译、总结、学习笔记及音频播放器；源语言默认自动识别，视频字幕预览按需选择。
 - “更多选项”可设置网络视频的开始/结束时间；人物档案可从旧版界面或 CLI 开启。
-- 精简界面可阅读转写、总结和学习笔记，导出原文 Markdown/SRT/JSON、总结、学习笔记及字幕视频。完整双语稿及其他分析文件保存在任务目录。
-- 历史任务的“更多操作”支持重新分析、重试失败分段、生成或播放通用字幕视频。播放使用系统默认播放器，不依赖 PotPlayer。
+- 精简界面可阅读转写、总结和学习笔记，导出原文 Markdown/SRT/JSON、总结、学习笔记及音频播放器包。完整双语稿及其他分析文件保存在任务目录。
+- 历史任务的“更多操作”支持重新分析、重试失败分段、生成音频播放器或按需生成通用字幕视频。播放使用隐藏的 ffplay，不依赖 PotPlayer。
 - 密钥默认保留在当前标签页；勾选“在此浏览器记住密钥”后保存在该浏览器本地存储。不要在公共电脑上记住密钥。
 - 部分翻译失败会显示“部分完成”，占位字幕明确标记“翻译暂缺”，已有结果保留以便重试。
 
@@ -66,7 +66,7 @@ Linux/macOS 可安装 `requirements.txt` 并通过 CLI 运行，ffmpeg 和 JavaS
     audio/                源媒体副本与中间音频
     transcripts/          原始稿、清理稿、原文字幕
     analysis/             每次分析的独立结果
-    video/                最终 MP4；subtitles/ 存放字幕，assets/ 存放封面和日志
+    video/                最终 MP4、悬挂字幕框；subtitles/ 存放字幕，assets/ 存放封面和日志
     thumbnails/
     logs/
 ```
@@ -77,15 +77,20 @@ Linux/macOS 可安装 `requirements.txt` 并通过 CLI 运行，ffmpeg 和 JavaS
 
 可在 `features` 中配置 `summary`、`study_notes` 和 `character_profile`；网页默认请求完整核心结果，CLI 可按下列选项覆盖。人物档案开关参与提示词、缓存和导出，关闭时不会请求该部分内容。
 
-完整流程结束后清理中间 WAV，源 M4A 保留至用户主动清理，以便重新生成预览。旧配置中的 `delete_source_m4a_after_preview` 不再生效。
+分析默认采用“高置信度自动修复 + 原文可回溯”：只有模型明确提供源语言修复候选且 `repair_confidence >= 0.90` 时，修复才会进入 `repaired_transcript.srt` 和播放器；原始 ASR 保留在 `transcripts/`，每条候选的原文、修复文、置信度和状态保存在 `repair_log.json` 与 `review.md`。可在 `analysis.auto_repair_enabled`、`analysis.auto_repair_threshold` 或 CLI 的 `--no-auto-repair`、`--auto-repair-threshold` 中调整。
+
+完整流程结束后清理中间 WAV，源 M4A 保留至用户主动清理，以便重新生成预览。旧配置中的 `delete_source_m4a_after_preview` 不再生效。默认流程只在 `audio/` 生成播放器和双语时间轴，不编码 MP4；需要视频时使用 `--preview-mode video`。`.cmd` 启动器可直接打开悬挂字幕，不要求 Windows 预先关联 `.pyw` 文件。音频模式提供播放/暂停、进度拖动、10 秒快进/后退和键盘快捷键。
 
 开启总结时，分段分析完成后会额外请求一次全片总结，汇总所有分段摘要和要点，并标注来源时间段；复用分段缓存时也会重新生成全片总结。若最终总结请求失败，转写、翻译和学习资料仍保留，`video_summary.md` 会明确标记并列出全部可用分段摘要。
 
 ## 命令行
 
 ```powershell
-# 默认转写、翻译、总结、学习笔记，并生成字幕视频
+# 默认转写、翻译、总结、学习笔记，并生成音频播放器
 .\.venv\Scripts\python.exe main.py pipeline --input "D:\media\sample.mp4" --resume
+
+# 显式生成视频字幕预览
+.\.venv\Scripts\python.exe main.py pipeline --input "D:\media\sample.mp4" --preview-mode video --resume
 
 # 仅转写，不需要 Gemini Key
 .\.venv\Scripts\python.exe main.py transcribe --input "D:\media\sample.wav" --device cpu
@@ -97,7 +102,7 @@ Linux/macOS 可安装 `requirements.txt` 并通过 CLI 运行，ffmpeg 和 JavaS
 .\.venv\Scripts\python.exe main.py pipeline --url "视频链接" --modules transcribe,analyze
 ```
 
-`--resume` 当前复用**相同分析参数下成功的分段缓存**，不会跳过一次新 pipeline 的下载或转写。要继续已有任务，请从历史任务重新分析，或直接使用 `analyze`。改变人物档案选项会使用独立缓存并重新分析。
+`--resume` 当前复用**相同内容和分析参数下成功的分段/全片总结缓存**，不会跳过一次新 pipeline 的下载或转写。要继续已有任务，请从历史任务重新分析，或直接使用 `analyze`。改变人物档案选项会使用独立缓存并重新分析。分析结果还会记录 `quality_status`：无风险为 `complete`，有人工复查项但流程完成为 `complete_with_warnings`，存在缺失翻译为 `partial`。
 
 CLI 分析退出码：`0` 成功，`1` 失败，`2` 部分完成。源语言支持自动检测与 Whisper 语言代码；翻译和学习资料的目标语言目前为中文。
 
@@ -128,7 +133,8 @@ CI 覆盖 Windows / Ubuntu 和 Python 3.10 / 3.12。推送 `v*` 标签会触发 
 | --- | --- | --- |
 | 转写、中文翻译、总结、学习笔记 | 默认核心流程 | 完整流程和独立模块 |
 | 人物档案 | 使用旧版界面或 CLI | 分析选项中勾选 |
-| 字幕视频／默认播放器 | 结果中的更多操作 | 独立模块，手选音频、字幕、封面和分辨率 |
+| 音频播放器／悬挂字幕 | 默认完整流程、结果中的更多操作 | 独立模块，手选音频和字幕 |
+| 字幕视频 | `--preview-mode video` 或结果中的更多操作 | 独立模块，手选音频、字幕、封面和分辨率 |
 | 独立分析已有转写稿 | 从历史结果重新分析 | 可手动选择 transcript.json |
 | 检查分段、试跑 1／3 段 | 不单独展示 | 保留 |
 | Beam、计算类型、词级时间戳、浏览器 Cookies | 使用默认值或部分设置 | 保留高级参数 |
@@ -148,7 +154,7 @@ outputs/
     audio/         音频
     transcripts/   原文 JSON、SRT、Markdown
     analysis/      每次分析结果、分段和诊断
-    video/         最终 MP4 与字幕子目录
+    video/         最终 MP4、悬挂字幕框与字幕子目录
     thumbnails/    媒体封面
     logs/          该媒体的转写日志
   cache/analysis/  共用分析缓存
@@ -176,11 +182,11 @@ output/           开发验证截图和构建日志（不属于用户结果）
 - 源 M4A 保留至主动清理，便于重建字幕视频。
 - 全片总结覆盖所有分段摘要，并标注来源时间；失败时保留分段摘要。
 - 改进下载重试、JSON 修复、字幕路径转义和仅转写结果查看／导出。
-- 字幕视频使用静态封面和 25 fps；连续短句合并为约 5–9 秒的显示字幕，已有较长单句保留原时长，细分原始字幕保留。字号缩小，背景使用半透明黑色；不包含原视频画面。
+- 可选字幕视频使用静态封面和 25 fps；连续短句合并为约 5–9 秒的显示字幕，已有较长单句保留原时长，细分原始字幕保留。原文使用白色、中文使用暖黄色，配深色细描边，不使用字幕背景框；不包含原视频画面。
 - 旧版本已删除的源音频不会自动恢复；ASR 和翻译仍需按复查清单核验。
 
 ## 新的默认设置与文件入口
 
 默认转写质量为 high，模型为 large-v3-turbo，并启用词级时间戳。可以手动选择快速 small；已保存的个人质量设置仍可覆盖默认值。
 
-每个媒体任务的 README.md 提供原文、最新总结、学习笔记和视频入口。video/ 根目录只保留视频与播放说明；细分及合并字幕放在 subtitles/，封面、日志和关联数据放在 assets/，不再重复复制分析文档。旧 previews/potplayer 目录仍可读取，新任务不再生成该层级。
+每个媒体任务的 README.md 提供原文、最新总结、学习笔记和默认音频模式入口；显式选择视频模式后再提供字幕视频和视频悬挂字幕框。audio/ 保留源音频、音频模式双语字幕和独立音频播放器；video/ 仅在生成视频模式时使用；细分字幕放在 subtitles/，封面、日志和关联数据放在 assets/，不再重复复制分析文档。旧 previews/potplayer 目录仍可读取。

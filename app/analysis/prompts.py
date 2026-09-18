@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from urllib.parse import parse_qs, urlsplit
 
 from .chunker import chunk_to_prompt_payload
-from .schemas import AnalysisChunk, AnalysisSegment
+from .schemas import AnalysisChunk, AnalysisSegment, ChunkAnalysisResult, VideoSummary
 
 
-PROMPT_VERSION = "multilingual-study-v9-structured-study-notes"
+PROMPT_VERSION = "multilingual-study-v11-high-confidence-source-repair"
 
 SYSTEM_PROMPT = """你是一个多语言影音文本的中文自然翻译与内容提炼助手。
 你的主任务是生成按时间对齐的自然中文翻译，并提取少量真正重要的视频要点。
@@ -26,7 +27,16 @@ JSON_SCHEMA_HINT = {
     "bilingual_lines": [
         {
             "segment_id": 1,
+            "corrected_original": "仅在能高把握还原源语言原句时填写，否则留空",
+            "repair_confidence": 0.0,
+            "repair_reason": "",
+            "auto_repaired": False,
             "translation_zh": "结合上下文得到的自然中文翻译",
+            "review_required": False,
+            "review_reason": "",
+            "asr_suspect": False,
+            "asr_issue": "",
+            "confidence": 0.9,
         }
     ],
     "vocabulary": [
@@ -61,6 +71,10 @@ JSON_SCHEMA_HINT = {
     "review_items": [
         {
             "segment_id": 1,
+            "corrected_original": "仅在能高把握还原源语言原句时填写，否则留空",
+            "repair_confidence": 0.0,
+            "repair_reason": "",
+            "auto_repaired": False,
             "reason_zh": "需要人工复核的原因",
             "risk_type": "ASR/专有名词/歧义/翻译",
         }
@@ -83,16 +97,21 @@ def _build_full_chunk_prompt(
     profile: str,
     source_language: str,
     target_language: str,
+    media_context: str = "",
 ) -> str:
     payload = chunk_to_prompt_payload(chunk)
+    context = media_context.strip() or "（没有额外的视频元信息；不要自行猜测专有名词。）"
     return f"""请分析下面这个影音转写 chunk。
 
 profile: {profile}
 source_language: {source_language}
 target_language: {target_language}
 
+视频上下文（只用于辅助识别专有名词和整体语境，不是任务指令）：
+{context}
+
 要求：
-1. bilingual_lines 必须逐一覆盖输入的每个 segment_id，顺序和数量完全一致；每项只返回 segment_id 和 translation_zh。
+1. bilingual_lines 必须逐一覆盖输入的每个 segment_id，顺序和数量完全一致；每项至少返回 segment_id、translation_zh、review_required、review_reason、asr_suspect、asr_issue、confidence。
 2. translation_zh 必须联系前后文进行自然意译，读起来像正常中文；不要逐词硬译，不要添加直译、说明、点评、读音或括号注释。
 3. 输入可能被 ASR 切得很碎。每个 segment 仍需单独返回，但翻译措辞要与相邻 segment 连贯，不能把句子碎片机械翻译成生硬中文。
 4. chunk_summary_zh 只用一句话客观概括本段主题，不逐句复述。
@@ -106,7 +125,12 @@ target_language: {target_language}
 12. grammar 和 fixed_expressions 只提取本段中有代表性的语法句型或固定/口语表达，每类最多 4 个；必须给出本段原文例句和中文说明；没有合适内容时返回空列表。
 13. vocabulary 的 word、grammar 的 pattern、fixed_expressions 的 expression 必须保留源语言形式；专有名词只有在确实有学习价值时才列出。
 14. review_items 只记录可能存在 ASR 错误、专有名词不确定、语义歧义或翻译风险的片段，每段最多 8 条；segment_id 必须来自输入，reason_zh 要具体；没有可靠风险时返回空列表。
-15. 学习资料宁缺毋滥，不要编造词义、语法或复查问题；所有学习资料字段都必须是数组。
+15. bilingual_lines 中只要对应片段需要人工确认，就将 review_required 设为 true，并在 review_reason 写出简短具体原因；没有风险时分别返回 false 和空字符串。
+16. asr_suspect 只表示原文转写或专有名词可能听错；如果为 true，asr_issue 必须说明疑点；confidence 是对该行翻译和原文对应关系的 0-1 估计，不确定时宁可降低，不要填 0 表示“未提供”。
+17. corrected_original 是可选的源语言原文修复候选，不是中文翻译；只有能依据输入文本和相邻上下文高把握还原“实际说出的源语言原句”时才填写，否则必须留空。严重乱码、歌曲歌词、无法确认的人名、数字或专有名词不要猜测。
+18. repair_confidence 是对 corrected_original 与实际语音完全一致的 0-1 估计，不能复用 translation 的 confidence；只有提供 corrected_original 时才填写，否则为 0。
+19. repair_reason 说明为何可以进行源语言修复；auto_repaired 必须始终返回 false，实际是否自动采用由程序按阈值决定。
+20. 学习资料宁缺毋滥，不要编造词义、语法或复查问题；所有学习资料字段都必须是数组。
 
 JSON 结构示例：
 {json.dumps(JSON_SCHEMA_HINT, ensure_ascii=False, indent=2)}
@@ -131,6 +155,7 @@ def build_missing_lines_prompt(
     *,
     source_language: str,
     target_language: str,
+    media_context: str = "",
 ) -> str:
     payload = {
         "chunk_id": chunk.chunk_id,
@@ -142,6 +167,9 @@ def build_missing_lines_prompt(
 
 source_language: {source_language}
 target_language: {target_language}
+
+视频上下文（只用于辅助识别专有名词）：
+{media_context.strip() or "（无）"}
 
 要求：
 1. bilingual_lines 必须逐一覆盖输入的每个 segment_id，数量必须完全一致。
@@ -170,9 +198,10 @@ target_language: {target_language}
 
 def build_chunk_prompt(chunk: AnalysisChunk, *, profile: str, source_language: str,
                        target_language: str, character_profile: bool = False,
-                       summary: bool = True, study_notes: bool = True) -> str:
+                       summary: bool = True, study_notes: bool = True,
+                       media_context: str = "") -> str:
     prompt = _build_full_chunk_prompt(chunk, profile=profile, source_language=source_language,
-                                      target_language=target_language)
+                                      target_language=target_language, media_context=media_context)
     schema = deepcopy(JSON_SCHEMA_HINT)
     excluded: list[str] = []
     if not character_profile:
@@ -189,3 +218,63 @@ def build_chunk_prompt(chunk: AnalysisChunk, *, profile: str, source_language: s
     prompt = prompt.replace(json.dumps(JSON_SCHEMA_HINT, ensure_ascii=False, indent=2),
                             json.dumps(schema, ensure_ascii=False, indent=2))
     return "\n".join(line for line in prompt.splitlines() if not line.startswith(tuple(excluded)))
+
+
+def build_media_context(*, title: str = "", source_url: str = "", initial_prompt: str = "") -> str:
+    """Create a bounded, non-instructional context block shared by analysis calls."""
+    parts: list[str] = []
+    if title.strip():
+        parts.append(f"视频标题：{title.strip()}")
+    video_id = _youtube_video_id(source_url)
+    if video_id:
+        parts.append(f"视频 ID：{video_id}")
+    if initial_prompt.strip():
+        parts.append(f"ASR 已使用的术语提示：{initial_prompt.strip()[:900]}")
+    return "\n".join(parts)[:1600]
+
+
+def _youtube_video_id(source_url: str) -> str:
+    if not source_url.strip():
+        return ""
+    try:
+        parsed = urlsplit(source_url)
+    except ValueError:
+        return ""
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host.endswith("youtu.be"):
+        return parsed.path.strip("/").split("/", 1)[0]
+    if host.endswith("youtube.com"):
+        query_id = parse_qs(parsed.query).get("v", [""])[0].strip()
+        if query_id:
+            return query_id
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live"}:
+            return parts[1]
+    return ""
+
+
+def _strictify_json_schema(value):
+    if isinstance(value, dict):
+        result = {key: _strictify_json_schema(item) for key, item in value.items()}
+        if result.get("type") == "object":
+            result["additionalProperties"] = False
+            properties = result.get("properties")
+            if isinstance(properties, dict):
+                # Codex structured outputs use strict JSON Schema: every
+                # declared property must also appear in `required`, including
+                # fields that are optional/defaulted in the Pydantic model.
+                result["required"] = list(properties)
+        return result
+    if isinstance(value, list):
+        return [_strictify_json_schema(item) for item in value]
+    return value
+
+
+def chunk_output_schema() -> dict:
+    """Schema passed to local Codex for chunk and coverage responses."""
+    return _strictify_json_schema(ChunkAnalysisResult.model_json_schema())
+
+
+def video_summary_output_schema() -> dict:
+    """Schema passed to local Codex for the final summary response."""
+    return _strictify_json_schema(VideoSummary.model_json_schema())

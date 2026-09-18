@@ -219,26 +219,31 @@ function renderAnalysisQuick(run, item = null) {
 function renderPreviewQuick(run, item = null) {
   const title = item ? shortArtifactLabel(item) : "当前文件组";
   if (!run) {
-    $("previewQuick").innerHTML = `<p>${escapeHtml(title)} 暂无媒体预览包。请先生成 字幕视频。</p>`;
+    $("previewQuick").innerHTML = `<p>${escapeHtml(title)} 暂无媒体预览包。请先生成音频播放器或字幕视频。</p>`;
     return;
   }
   const files = run.files || {};
   const video = files["live_preview.mp4"];
+  const audioLauncher = files["run_audio_subtitle_player.cmd"];
+  const audioPlayer = files["audio_subtitle_player.pyw"];
+  const audioSubtitle = files["audio_mode.bilingual.srt"];
   const study = files["live_preview.study.srt"];
   const bilingual = files["live_preview.bilingual.srt"];
   const zh = files["live_preview.zh.srt"];
   const ja = files["live_preview.ja.srt"];
   const readme = files["README_play.txt"];
   const primaryActions = [
+    audioLauncher ? ["播放音频 + 悬挂字幕", { path: audioLauncher.path, action: "file" }, "primary-action"] : null,
     // Subtitles are burned into live_preview.mp4; do not pass an external
     // subtitle here or the player would render a duplicate subtitle layer.
     video ? ["播放预览视频", { path: video.path, action: "file" }, "primary-action"] : null,
-    [bilingual ? "查看双语字幕" : "查看中文字幕", bilingual || zh, "secondary-action"],
+    [audioSubtitle ? "查看音频双语字幕" : (bilingual ? "查看双语字幕" : "查看中文字幕"), audioSubtitle || bilingual || zh, "secondary-action"],
     ["打开预览目录", { path: run.path, action: "folder" }, "secondary-action"],
   ].filter(Boolean);
   const extraActions = [
     ["学习字幕", study],
     ["原文字幕", ja],
+    ["播放器脚本", audioPlayer],
     ["播放说明", readme],
   ].filter(([, file]) => file);
   $("previewQuick").innerHTML = `
@@ -275,7 +280,7 @@ document.addEventListener("click", (event) => {
 });
 
 function statusLabel(status) {
-  return { pending: "等待中", running: "运行中", succeeded: "已完成", failed: "失败", stopped: "已停止", stopping: "正在取消", partial: "部分完成" }[status] || status;
+  return { pending: "等待中", running: "运行中", succeeded: "已完成", complete_with_warnings: "完成但需复查", failed: "失败", stopped: "已停止", stopping: "正在取消", partial: "部分完成" }[status] || status;
 }
 
 function moduleLabel(module) {
@@ -299,7 +304,7 @@ async function loadJobs() {
   const completedNow = jobs.some((job) => {
     const previous = state.jobStatuses.get(job.job_id);
     state.jobStatuses.set(job.job_id, job.status);
-    return previous && previous !== job.status && ["succeeded", "partial", "failed", "stopped"].includes(job.status);
+    return previous && previous !== job.status && ["succeeded", "complete_with_warnings", "partial", "failed", "stopped"].includes(job.status);
   });
   setRunning(anyRunning);
   const active = jobs.find((job) => job.job_id === state.activeJobId) || jobs[0];

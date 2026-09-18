@@ -9,6 +9,40 @@ from app import preview
 from app.utils import RunLogger
 
 
+def test_default_audio_preview_skips_video_encoding(tmp_path: Path, monkeypatch) -> None:
+    audio = tmp_path / "audio.m4a"
+    subtitle = tmp_path / "translation_zh.srt"
+    output_dir = tmp_path / "audio_preview"
+    audio.write_bytes(b"test")
+    subtitle.write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\n原文\n中文\n",
+        encoding="utf-8",
+    )
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("audio mode must not encode a video")
+
+    monkeypatch.setattr(preview, "build_preview_video", fail_if_called)
+    result = preview.create_preview(
+        preview.PreviewOptions(
+            audio=audio,
+            subtitle=subtitle,
+            cover=None,
+            output_dir=output_dir,
+            resolution="1280x720",
+            subtitle_name="live_preview.zh.srt",
+            video_name="live_preview.mp4",
+            mode="audio",
+        )
+    )
+
+    assert result["audio_player"].exists()
+    assert result["audio_launcher"].exists()
+    assert result["audio_subtitle"].exists()
+    assert result["readme"].exists()
+    assert not (output_dir / "live_preview.mp4").exists()
+
+
 def test_preview_prefers_bilingual_subtitle_for_burn_in(monkeypatch, tmp_path: Path) -> None:
     audio = tmp_path / "audio.m4a"
     subtitle = tmp_path / "translation_zh.srt"
@@ -44,7 +78,7 @@ def test_preview_prefers_bilingual_subtitle_for_burn_in(monkeypatch, tmp_path: P
     monkeypatch.setattr(preview, "maybe_write_study_subtitle", lambda *args: None)
     monkeypatch.setattr(preview, "build_preview_video", fake_build)
     monkeypatch.setattr(preview, "copy_learning_notes", lambda *args: {})
-    monkeypatch.setattr(preview, "write_readme", lambda *args: None)
+    monkeypatch.setattr(preview, "write_readme", lambda *args, **kwargs: None)
 
     preview.create_potplayer_preview(
         preview.PreviewOptions(
@@ -63,6 +97,11 @@ def test_preview_prefers_bilingual_subtitle_for_burn_in(monkeypatch, tmp_path: P
     assert not legacy_subtitle.exists()
     assert (output_dir / "subtitles/live_preview.zh.srt").exists()
     assert (output_dir / "subtitles/live_preview.bilingual.srt").exists()
+    assert (output_dir / "floating_subtitle_overlay.pyw").exists()
+    assert (output_dir / "run_floating_subtitle_overlay.cmd").exists()
+    assert (output_dir / "audio/audio_subtitle_player.pyw").exists()
+    assert (output_dir / "audio/run_audio_subtitle_player.cmd").exists()
+    assert (output_dir / "audio/audio_mode.bilingual.srt").exists()
 
 
 @pytest.mark.parametrize("name", ["normal", "speaker's", "中文 空格 [1],semi;"])
@@ -124,8 +163,9 @@ def test_preview_burns_subtitles_and_uses_audio_duration(monkeypatch, tmp_path: 
     assert "subtitles=filename=" in vf
     assert "force_style=" in vf
     assert "PrimaryColour=&H00FFFFFF" in vf
-    assert "OutlineColour=&H00000000" in vf
-    assert "BackColour=&H80000000" in vf
+    assert "OutlineColour=&H00141414" in vf
+    assert "BackColour=&HFF000000" in vf
+    assert "BorderStyle=1" in vf
     assert command[command.index("-framerate") + 1] == "25"
     assert "-shortest" not in command
     assert command[command.index("-t") + 1] == "3.500"

@@ -65,7 +65,7 @@ function selectSource(source) {
   }
 }
 function taskOptions() {
-  return {gemini_api_key: $("apiKey").value.trim(), analysis_model: $("analysisModel").value.trim(), analysis_fallback_model: $("fallbackModel").value.trim(), device: $("device").value, proxy: $("proxy").value.trim(), cookies: $("cookies").value.trim(), language: $("language").value, quality: $("quality").value, model: $("asrModel").value.trim(), character_profile: false, summary: true, study_notes: true, resume: true};
+  return {gemini_api_key: $("apiKey").value.trim(), analysis_model: $("analysisModel").value.trim(), analysis_fallback_model: $("fallbackModel").value.trim(), device: $("device").value, proxy: $("proxy").value.trim(), cookies: $("cookies").value.trim(), language: $("language").value, quality: $("quality").value, model: $("asrModel").value.trim(), preview_mode: $("previewMode").value, character_profile: false, summary: true, study_notes: true, resume: true};
 }
 function setRunning(running) {
   state.running = running;
@@ -90,7 +90,7 @@ async function startTask(transcribeOnly = false) {
   if (!input && !url) throw new Error("请先输入视频链接或选择本地文件。");
   await startJob("/api/pipeline", {...taskOptions(), input, url, module_transcribe: true, module_analyze: !transcribeOnly, module_preview: !transcribeOnly, download_start: $("downloadStart").value.trim(), download_end: $("downloadEnd").value.trim()});
 }
-const statusNames = {pending: "等待中", running: "处理中", stopping: "正在取消", stopped: "已取消", succeeded: "已完成", partial: "部分完成", failed: "失败"};
+const statusNames = {pending: "等待中", running: "处理中", stopping: "正在取消", stopped: "已取消", succeeded: "已完成", complete_with_warnings: "完成但需复查", partial: "部分完成", failed: "失败"};
 async function loadJobs() {
   const jobs = await api("/api/jobs");
   let changed = false;
@@ -113,8 +113,8 @@ async function loadJobs() {
     $("stopBtn").disabled = job.status === "stopping";
     $("stopBtn").dataset.jobId = job.job_id;
     $("logText").textContent = (job.recent_logs || []).join("\n");
-    $("jobWarning").hidden = !["failed", "partial"].includes(job.status);
-    $("jobWarning").textContent = job.status === "partial" ? "部分翻译未完成，已有结果已保存。可从更多操作中重试。" : "任务未能完成。请展开日志查看原因；已有转写可在历史任务中继续分析。";
+    $("jobWarning").hidden = !["failed", "partial", "complete_with_warnings"].includes(job.status);
+    $("jobWarning").textContent = job.status === "complete_with_warnings" ? "流程已完成，但发现人工复查项；请先查看复查清单。" : job.status === "partial" ? "部分翻译未完成，已有结果已保存。可从更多操作中重试。" : "任务未能完成。请展开日志查看原因；已有转写可在历史任务中继续分析。";
     if (job.status === "failed") $("logDetails").open = true;
   }
   if (changed) await loadFiles(true);
@@ -190,13 +190,18 @@ function renderExports(item) {
   }
   const video = item.preview?.files?.["live_preview.mp4"];
   if (video) { const link = node("a", "带字幕视频"); link.href = `/api/download?path=${encodeURIComponent(video.path)}`; links.append(link); }
+  const audioLauncher = item.preview?.files?.["run_audio_subtitle_player.cmd"];
+  if (audioLauncher) { const link = node("a", "音频播放器启动器"); link.href = `/api/download?path=${encodeURIComponent(audioLauncher.path)}`; links.append(link); }
 }
 function updateActions() {
   const item = selected(); if (!item) return;
   $("reanalyzeBtn").disabled = state.running || !item.transcript;
   $("previewBtn").disabled = state.running || !(item.audio || item.clean_audio) || !item.analysis?.files?.["translation_zh.srt"];
   $("deleteBtn").disabled = state.running || !item.deletable;
-  $("playBtn").hidden = !item.preview?.files?.["live_preview.mp4"];
+  const audioLauncher = item.preview?.files?.["run_audio_subtitle_player.cmd"];
+  const video = item.preview?.files?.["live_preview.mp4"];
+  $("playBtn").hidden = !audioLauncher && !video;
+  $("playBtn").textContent = audioLauncher ? "播放音频 + 悬挂字幕" : "播放带字幕视频";
   $("storageHint").textContent = `文件占用约 ${((item.storage_bytes || 0) / 1024 / 1024).toFixed(1)} MB。重新分析会复用相同参数下成功的分段。`;
 }
 async function reanalyze() {
@@ -219,8 +224,8 @@ $("refreshStatusBtn").addEventListener("click", safe(() => loadStatus()));
 $("openDataBtn").addEventListener("click", safe(() => post("/api/open-folder", {path: state.status.data_dir})));
 $("folderBtn").addEventListener("click", safe(() => post("/api/open-folder", {path: selected()?.group_path || selected()?.transcript?.path})));
 $("reanalyzeBtn").addEventListener("click", safe(() => reanalyze()));
-$("previewBtn").addEventListener("click", safe(async () => { const item = selected(); await startJob("/api/preview", {audio: (item.audio || item.clean_audio).path, subtitle: item.analysis.files["translation_zh.srt"].path, artifact_run_id: item.run_id}); }));
-$("playBtn").addEventListener("click", safe(() => { const files = selected().preview.files; return post("/api/open-file", {path: files["live_preview.mp4"].path}); }));
+$("previewBtn").addEventListener("click", safe(async () => { const item = selected(); await startJob("/api/preview", {audio: (item.audio || item.clean_audio).path, subtitle: item.analysis.files["translation_zh.srt"].path, artifact_run_id: item.run_id, mode: $("previewMode").value}); }));
+$("playBtn").addEventListener("click", safe(() => { const files = selected().preview.files; const target = files["run_audio_subtitle_player.cmd"] || files["live_preview.mp4"]; return post("/api/open-file", {path: target.path}); }));
 $("deleteBtn").addEventListener("click", safe(async () => {
   const item = selected();
   if (!item || !confirm(`删除“${item.label}”的处理结果、缓存音频和预览文件？原始输入文件不会删除。`)) return;

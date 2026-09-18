@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from app.analysis import gemini_client
-from app.analysis.gemini_client import GeminiClient
+from app.analysis.gemini_client import GeminiClient, LocalLLMClient
+from app.analysis.prompts import chunk_output_schema
 from app.utils import AppError
 
 
@@ -133,3 +137,92 @@ def test_fallback_quota_error_uses_normal_retry_policy(monkeypatch: pytest.Monke
     assert len(urls) == 3
     assert "gemini-3.5-flash-lite" in urls[0]
     assert all("gemini-3.1-flash-lite" in url for url in urls[1:])
+
+
+def test_chunk_output_schema_is_strict_for_every_object() -> None:
+    schema = chunk_output_schema()
+
+    def assert_strict(node: object) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if node.get("type") == "object" and isinstance(properties, dict):
+                assert node.get("additionalProperties") is False
+                assert set(node.get("required", [])) == set(properties)
+            for value in node.values():
+                assert_strict(value)
+        elif isinstance(node, list):
+            for value in node:
+                assert_strict(value)
+
+    assert_strict(schema)
+
+
+def test_local_client_invokes_codex_exec_and_reads_last_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    logger = FakeLogger()
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((command, kwargs))
+        output_path = Path(command[command.index("-o") + 1])
+        output_path.write_text('{"value":"local"}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout=b"ignored", stderr=b"")
+
+    monkeypatch.setattr(gemini_client.subprocess, "run", fake_run)
+
+    client = LocalLLMClient(
+        command=sys.executable,
+        model="gpt-test",
+        timeout_seconds=30,
+        cwd=tmp_path,
+        logger=logger,  # type: ignore[arg-type]
+    )
+
+    assert json.loads(client.generate_json_text("task", system_prompt="policy"))["value"] == "local"
+    command, kwargs = calls[0]
+    assert command[1] == "exec"
+    assert "--ephemeral" in command
+    assert command[command.index("--sandbox") + 1] == "read-only"
+    assert command[command.index("--model") + 1] == "gpt-test"
+    assert b"SYSTEM POLICY:" in kwargs["input"]  # type: ignore[operator]
+    assert b"TASK:" in kwargs["input"]  # type: ignore[operator]
+    assert any("Codex local request finished" in message for message in logger.messages)
+
+
+def test_local_client_uses_explicit_isolation_reasoning_and_output_schema(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((command, kwargs))
+        output_path = Path(command[command.index("-o") + 1])
+        schema_path = Path(command[command.index("--output-schema") + 1])
+        assert json.loads(schema_path.read_text(encoding="utf-8"))["type"] == "object"
+        output_path.write_text('{"value":"local"}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setenv("GEMINI_API_KEY", "should-not-reach-worker")
+    monkeypatch.setattr(gemini_client.subprocess, "run", fake_run)
+    client = LocalLLMClient(
+        command=sys.executable,
+        model="gpt-test",
+        timeout_seconds=30,
+        cwd=tmp_path,
+        reasoning_effort="medium",
+        ignore_user_config=True,
+    )
+
+    response = client.generate_json_text(
+        "task",
+        system_prompt="policy",
+        output_schema={"type": "object", "properties": {"value": {"type": "string"}}},
+    )
+
+    assert json.loads(response)["value"] == "local"
+    command, kwargs = calls[0]
+    assert "--ignore-user-config" in command
+    assert "--output-schema" in command
+    assert command[command.index("-c") + 1] == 'model_reasoning_effort="medium"'
+    assert "GEMINI_API_KEY" not in kwargs["env"]  # type: ignore[operator]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,17 @@ from app.config import project_root
 from app.utils import AppError, RunLogger, generate_run_id
 from app.output_layout import ensure_media_subdirs, group_dir_from_artifact_path, group_name_from_stem, media_group_dir, write_media_index
 
-from .cache import cache_key, chunk_result_path, load_cached_result, save_chunk_result, save_failed_response
+from .cache import (
+    cache_key,
+    chunk_result_path,
+    load_cached_result,
+    load_cached_summary,
+    save_chunk_result,
+    save_failed_response,
+    save_summary_result,
+    summary_cache_key,
+    summary_result_path,
+)
 from .chunker import load_transcript, make_chunks, transcript_segments
 from .exporters import export_all
 from .summary import generate_video_summary
@@ -17,9 +28,12 @@ from .prompts import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
     build_chunk_prompt,
+    build_media_context,
     build_missing_lines_prompt,
     build_repair_prompt,
+    chunk_output_schema,
 )
+from .repairs import apply_high_confidence_repairs
 from .schemas import (
     AnalysisChunk,
     AnalysisDocument,
@@ -60,11 +74,26 @@ class AnalyzeOptions:
     character_profile: bool = False
     summary: bool = True
     study_notes: bool = True
+    local_command: str = "codex"
+    local_timeout_seconds: float = 900.0
+    local_reasoning_effort: str = ""
+    local_ignore_user_config: bool = True
+    auto_repair_enabled: bool = True
+    auto_repair_threshold: float = 0.90
+    # Four workers is the default balance for local Codex requests: enough to
+    # keep the pipeline busy without turning transient rate limits into a
+    # wave of simultaneous failures.  The CLI/config can override it.
+    local_concurrency: int = 4
 
 
 def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
     document = load_transcript(options.input_file)
     source_language = options.source_language or document.meta.detected_language or document.meta.language or "auto"
+    media_context = build_media_context(
+        title=document.meta.title,
+        source_url=document.meta.source_url,
+        initial_prompt=document.meta.initial_prompt_used,
+    )
     segments = transcript_segments(document)
     chunks = make_chunks(
         segments,
@@ -89,7 +118,11 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
     failed_dir.mkdir(parents=True, exist_ok=True)
     logger = RunLogger(output_dir / "run.log", debug=options.debug)
     logger.write(f"analysis started input={options.input_file}")
-    logger.write(f"chunks={len(chunks)} dry_run={options.dry_run} provider={options.provider} model={options.model}")
+    logger.write(
+        f"chunks={len(chunks)} dry_run={options.dry_run} provider={options.provider} "
+        f"model={options.model} reasoning={options.local_reasoning_effort or 'n/a'} "
+        f"concurrency={max(1, options.local_concurrency) if options.provider == 'local' else 1}"
+    )
 
     if options.dry_run:
         dry_run_file = output_dir / "chunks_preview.md"
@@ -104,9 +137,10 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
         }
 
     client = _make_client(options, logger)
-    results: list[ChunkAnalysisResult] = []
-    failed: list[FailedChunk] = []
+    results: list[ChunkAnalysisResult | None] = [None] * len(chunks)
+    failed_by_index: dict[int, FailedChunk] = {}
     skipped = 0
+    pending: list[tuple[int, AnalysisChunk, Path, Path]] = []
 
     for index, chunk in enumerate(chunks, start=1):
         key = cache_key(
@@ -118,7 +152,9 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
             parameters={"provider": options.provider, "source_language": source_language,
                         "target_language": options.target_language, "temperature": options.temperature,
                         "character_profile": options.character_profile, "summary": options.summary,
-                        "study_notes": options.study_notes},
+                        "study_notes": options.study_notes, "media_context": media_context,
+                        "reasoning_effort": options.local_reasoning_effort,
+                        "ignore_user_config": options.local_ignore_user_config},
         )
         result_path = chunk_result_path(chunks_dir, chunk, key)
         shared_result_path = chunk_result_path(shared_cache_dir, chunk, key)
@@ -135,33 +171,82 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
                     skipped += 1
                     cached = _canonicalize_result(cached, chunk)
                     save_chunk_result(result_path, cached)
-                    results.append(cached)
+                    results[index - 1] = cached
                     logger.write(f"skip validated cache {chunk.chunk_id} ({index}/{len(chunks)})")
                     continue
 
         logger.write(f"process {chunk.chunk_id} ({index}/{len(chunks)})")
+
+        pending.append((index, chunk, result_path, shared_result_path))
+
+    def process_pending(
+        item: tuple[int, AnalysisChunk, Path, Path],
+    ) -> tuple[int, ChunkAnalysisResult, FailedChunk | None]:
+        index, chunk, result_path, shared_result_path = item
         try:
-            result = _process_chunk(client, chunk, options, source_language, logger)
+            result = _process_chunk(
+                client,
+                chunk,
+                options,
+                source_language,
+                logger,
+                media_context=media_context,
+            )
             save_chunk_result(result_path, result)
             if options.cache_enabled and not _result_has_fallback(result):
                 save_chunk_result(shared_result_path, result)
-            results.append(result)
+            return index, result, None
         except Exception as exc:
             raw_text = getattr(exc, "raw_text", "")
             failed_path = save_failed_response(failed_dir, chunk.chunk_id, raw_text, str(exc))
-            failed.append(FailedChunk(chunk_id=chunk.chunk_id, error=str(exc), raw_response_file=str(failed_path)))
+            failed_chunk = FailedChunk(
+                chunk_id=chunk.chunk_id,
+                error=str(exc),
+                raw_response_file=str(failed_path),
+            )
             logger.write(f"failed {chunk.chunk_id}: {exc}")
             fallback_result = _fallback_chunk_result(chunk)
             save_chunk_result(result_path, fallback_result)
-            results.append(fallback_result)
             logger.write(f"fallback {chunk.chunk_id}: preserved {len(chunk.segments)} source segments")
+            return index, fallback_result, failed_chunk
 
-    results = _ensure_global_coverage(chunks, results, logger)
+    if pending:
+        worker_count = min(
+            len(pending),
+            max(1, options.local_concurrency) if options.provider == "local" else 1,
+        )
+        if worker_count == 1:
+            completed = (process_pending(item) for item in pending)
+            for index, result, failed_chunk in completed:
+                results[index - 1] = result
+                if failed_chunk is not None:
+                    failed_by_index[index] = failed_chunk
+        else:
+            with ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="live-transcriber-analysis",
+            ) as executor:
+                futures = [executor.submit(process_pending, item) for item in pending]
+                for future in as_completed(futures):
+                    index, result, failed_chunk = future.result()
+                    results[index - 1] = result
+                    if failed_chunk is not None:
+                        failed_by_index[index] = failed_chunk
+                    logger.write(
+                        f"finished {chunks[index - 1].chunk_id} ({index}/{len(chunks)})"
+                    )
+
+    if any(result is None for result in results):
+        raise AppError("分析任务未能为所有 chunk 生成结果。")
+    ordered_results = [result for result in results if result is not None]
+    failed = [failed_by_index[index] for index in sorted(failed_by_index)]
+
+    ordered_results = _ensure_global_coverage(chunks, ordered_results, logger)
     fallback_lines = sum(
-        1 for result in results for line in result.bilingual_lines
+        1 for result in ordered_results for line in result.bilingual_lines
         if line.brief_note == FALLBACK_TRANSLATION_NOTE
     )
-    fallback_chunks = sum(1 for result in results if _result_has_fallback(result))
+    fallback_chunks = sum(1 for result in ordered_results if _result_has_fallback(result))
 
     meta = AnalysisMeta(
         character_profile=options.character_profile,
@@ -173,6 +258,7 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
         provider=options.provider,
         model=options.model,
         fallback_model=options.fallback_model,
+        reasoning_effort=options.local_reasoning_effort if options.provider == "local" else "",
         profile=options.profile,
         source_language=source_language,
         target_language=options.target_language,
@@ -185,9 +271,48 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
         skipped_chunks=skipped,
         fallback_chunks=fallback_chunks,
         fallback_lines=fallback_lines,
+        auto_repair_enabled=options.auto_repair_enabled,
+        auto_repair_threshold=options.auto_repair_threshold,
     )
-    analysis_document = AnalysisDocument(meta=meta, chunks=results, failed_chunks=failed)
-    generate_video_summary(analysis_document, client, logger)
+    analysis_document = AnalysisDocument(meta=meta, chunks=ordered_results, failed_chunks=failed)
+    if options.summary:
+        summary_key = summary_cache_key(
+            analysis_document,
+            prompt_version=PROMPT_VERSION,
+            media_context=media_context,
+        )
+        summary_path = summary_result_path(shared_cache_dir, summary_key)
+        cached_summary = (
+            load_cached_summary(summary_path)
+            if options.resume and options.cache_enabled
+            else None
+        )
+        if cached_summary is not None:
+            analysis_document.video_summary = cached_summary
+            analysis_document.video_summary_error = ""
+            logger.write(f"skip validated summary cache key={summary_key}")
+        else:
+            generate_video_summary(analysis_document, client, logger, media_context=media_context)
+            if analysis_document.video_summary is not None and options.cache_enabled:
+                save_summary_result(summary_path, analysis_document.video_summary)
+                logger.write(f"saved summary cache key={summary_key}")
+    if options.auto_repair_enabled:
+        repair_records = apply_high_confidence_repairs(
+            analysis_document,
+            threshold=options.auto_repair_threshold,
+            logger=logger,
+        )
+    else:
+        repair_records = []
+        analysis_document.meta = analysis_document.meta.model_copy(update={
+            "auto_repair_enabled": False,
+            "auto_repair_threshold": options.auto_repair_threshold,
+            "auto_repaired_lines": 0,
+            "unresolved_review_items": len(
+                [item for chunk in analysis_document.chunks for item in chunk.review_items]
+            ),
+        })
+    _update_quality_metadata(analysis_document)
     output_paths = export_all(analysis_document, output_dir)
     write_media_index(group_dir)
     logger.write(
@@ -199,6 +324,7 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
         "output_dir": output_dir,
         "document": analysis_document,
         "output_paths": output_paths,
+        "repair_records": repair_records,
         "dry_run": False,
     }
 
@@ -217,15 +343,26 @@ def _make_client(options: AnalyzeOptions, logger: RunLogger) -> LLMClient:
             logger=logger,
         )
     if options.provider == "local":
-        return LocalLLMClient()
-    raise AppError(f"未知 provider：{options.provider}。当前支持 gemini，local 仅预留接口。")
+        return LocalLLMClient(
+            command=options.local_command,
+            model=options.model,
+            timeout_seconds=options.local_timeout_seconds,
+            cwd=project_root(),
+            logger=logger,
+            reasoning_effort=options.local_reasoning_effort,
+            ignore_user_config=options.local_ignore_user_config,
+        )
+    raise AppError(f"未知 provider：{options.provider}。当前支持 gemini，local 使用本机 Codex CLI。")
 
 
 def _cache_model_name(options: AnalyzeOptions) -> str:
+    local_suffix = ""
+    if options.provider == "local":
+        local_suffix = f"|reasoning:{options.local_reasoning_effort or 'cli-default'}"
     fallback = options.fallback_model.strip()
     if not fallback or fallback == options.model:
-        return options.model
-    return f"{options.model}|fallback:{fallback}"
+        return options.model + local_suffix
+    return f"{options.model}|fallback:{fallback}{local_suffix}"
 
 
 def _process_chunk(
@@ -234,6 +371,8 @@ def _process_chunk(
     options: AnalyzeOptions,
     source_language: str,
     logger: RunLogger,
+    *,
+    media_context: str = "",
 ) -> ChunkAnalysisResult:
     prompt = build_chunk_prompt(
         chunk,
@@ -243,9 +382,35 @@ def _process_chunk(
         character_profile=options.character_profile,
         summary=options.summary,
         study_notes=options.study_notes,
+        media_context=media_context,
     )
     result = _request_valid_chunk_result(client, prompt, chunk, logger, options)
-    return _complete_chunk_coverage(client, result, chunk, source_language, options.target_language, logger)
+    return _complete_chunk_coverage(
+        client,
+        result,
+        chunk,
+        source_language,
+        options.target_language,
+        logger,
+        media_context=media_context,
+        use_output_schema=options.provider == "local",
+    )
+
+
+def _generate_json_text(
+    client: LLMClient,
+    prompt: str,
+    *,
+    system_prompt: str,
+    output_schema: dict | None = None,
+) -> str:
+    if output_schema is None:
+        return client.generate_json_text(prompt, system_prompt=system_prompt)
+    return client.generate_json_text(
+        prompt,
+        system_prompt=system_prompt,
+        output_schema=output_schema,
+    )
 
 
 def _request_valid_chunk_result(
@@ -272,7 +437,12 @@ def _request_valid_chunk_result(
         logger.write(
             f"json response attempt {chunk.chunk_id} attempt={attempt}/{total_attempts} mode={mode}"
         )
-        raw = client.generate_json_text(request_prompt, system_prompt=SYSTEM_PROMPT)
+        raw = _generate_json_text(
+            client,
+            request_prompt,
+            system_prompt=SYSTEM_PROMPT,
+            output_schema=chunk_output_schema() if options.provider == "local" else None,
+        )
         try:
             return _parse_chunk_result(raw, chunk, logger, options=options)
         except Exception as exc:
@@ -282,7 +452,7 @@ def _request_valid_chunk_result(
                 f"invalid json response {chunk.chunk_id} attempt={attempt}/{total_attempts}: {exc}"
             )
     wrapped = AppError(
-        f"Gemini 连续 {total_attempts} 次返回无效 JSON：{last_error or '未知格式错误'}"
+        f"模型连续 {total_attempts} 次返回无效 JSON：{last_error or '未知格式错误'}"
     )
     setattr(wrapped, "raw_text", invalid_raw)
     raise wrapped from last_error
@@ -316,7 +486,7 @@ def _parse_chunk_result(
     try:
         return ChunkAnalysisResult.model_validate(parsed)
     except Exception as exc:
-        wrapped = AppError(f"Gemini JSON 字段校验失败：{exc}")
+        wrapped = AppError(f"模型 JSON 字段校验失败：{exc}")
         setattr(wrapped, "raw_text", raw)
         raise wrapped from exc
 
@@ -328,6 +498,9 @@ def _complete_chunk_coverage(
     source_language: str,
     target_language: str,
     logger: RunLogger,
+    *,
+    media_context: str = "",
+    use_output_schema: bool = False,
 ) -> ChunkAnalysisResult:
     result = _canonicalize_result(result, chunk)
     for attempt in range(1, COVERAGE_RETRY_ATTEMPTS + 1):
@@ -343,9 +516,15 @@ def _complete_chunk_coverage(
             missing,
             source_language=source_language,
             target_language=target_language,
+            media_context=media_context,
         )
         try:
-            raw = client.generate_json_text(prompt, system_prompt=SYSTEM_PROMPT)
+            raw = _generate_json_text(
+                client,
+                prompt,
+                system_prompt=SYSTEM_PROMPT,
+                output_schema=chunk_output_schema() if use_output_schema else None,
+            )
             supplement = _parse_chunk_result(raw, chunk, logger)
             result = _merge_supplement(result, supplement, chunk)
         except Exception as exc:
@@ -368,20 +547,8 @@ def _complete_chunk_coverage(
 
 def _canonicalize_result(result: ChunkAnalysisResult, chunk: AnalysisChunk) -> ChunkAnalysisResult:
     expected = {segment.segment_id: segment for segment in chunk.segments}
-    by_id: dict[int, BilingualLine] = {}
-    for line in result.bilingual_lines:
-        segment = expected.get(line.segment_id)
-        if segment is None or line.segment_id in by_id or not line.translation_zh.strip():
-            continue
-        by_id[line.segment_id] = line.model_copy(
-            update={
-                "start": segment.start,
-                "end": segment.end,
-                "original": segment.text,
-            }
-        )
-    ordered = [by_id[segment.segment_id] for segment in chunk.segments if segment.segment_id in by_id]
     review_items = []
+    reviews_by_segment: dict[int, list] = {}
     for item in result.review_items:
         if item.segment_id is None:
             review_items.append(item)
@@ -389,15 +556,66 @@ def _canonicalize_result(result: ChunkAnalysisResult, chunk: AnalysisChunk) -> C
         segment = expected.get(item.segment_id)
         if segment is None:
             continue
-        review_items.append(
-            item.model_copy(
-                update={
-                    "start": segment.start,
-                    "end": segment.end,
-                    "original": segment.text,
-                }
-            )
+        normalized = item.model_copy(
+            update={
+                "start": segment.start,
+                "end": segment.end,
+                "original": segment.text,
+            }
         )
+        review_items.append(normalized)
+        reviews_by_segment.setdefault(item.segment_id, []).append(normalized)
+
+    by_id: dict[int, BilingualLine] = {}
+    for line in result.bilingual_lines:
+        segment = expected.get(line.segment_id)
+        if segment is None or line.segment_id in by_id or not line.translation_zh.strip():
+            continue
+        related_reviews = reviews_by_segment.get(line.segment_id, [])
+        review_reason = "；".join(
+            dict.fromkeys(item.reason_zh.strip() for item in related_reviews if item.reason_zh.strip())
+        )
+        asr_reviews = [item for item in related_reviews if _review_is_asr_related(item)]
+        by_id[line.segment_id] = line.model_copy(
+            update={
+                "start": segment.start,
+                "end": segment.end,
+                "original": segment.text,
+                "corrected_original": (
+                    line.corrected_original.strip()
+                    or next(
+                        (
+                            item.corrected_original.strip()
+                            for item in related_reviews
+                            if item.corrected_original.strip()
+                        ),
+                        "",
+                    )
+                ),
+                "repair_confidence": max(
+                    [line.repair_confidence, *[item.repair_confidence for item in related_reviews]]
+                ),
+                "repair_reason": (
+                    line.repair_reason.strip()
+                    or next(
+                        (
+                            item.repair_reason.strip() or item.reason_zh.strip()
+                            for item in related_reviews
+                            if item.corrected_original.strip()
+                        ),
+                        "",
+                    )
+                ),
+                "review_required": line.review_required or bool(related_reviews),
+                "review_reason": line.review_reason.strip() or review_reason,
+                "asr_suspect": line.asr_suspect or bool(asr_reviews),
+                "asr_issue": line.asr_issue.strip()
+                or "；".join(
+                    dict.fromkeys(item.reason_zh.strip() for item in asr_reviews if item.reason_zh.strip())
+                ),
+            }
+        )
+    ordered = [by_id[segment.segment_id] for segment in chunk.segments if segment.segment_id in by_id]
     return result.model_copy(
         update={
             "chunk_id": chunk.chunk_id,
@@ -406,6 +624,14 @@ def _canonicalize_result(result: ChunkAnalysisResult, chunk: AnalysisChunk) -> C
             "bilingual_lines": ordered,
             "review_items": review_items,
         }
+    )
+
+
+def _review_is_asr_related(item) -> bool:
+    text = f"{item.risk_type} {item.reason_zh}".lower()
+    return any(
+        marker in text
+        for marker in ("asr", "语音识别", "听不清", "听写", "专有名词")
     )
 
 
@@ -435,6 +661,8 @@ def _add_fallback_lines(result: ChunkAnalysisResult, missing, chunk: AnalysisChu
             translation_zh=f"[翻译暂缺] {segment.text}",
             literal_zh=segment.text,
             brief_note=FALLBACK_TRANSLATION_NOTE,
+            review_required=True,
+            review_reason=FALLBACK_TRANSLATION_NOTE,
             confidence=0.0,
         )
         for segment in missing
@@ -450,6 +678,27 @@ def _fallback_chunk_result(chunk: AnalysisChunk) -> ChunkAnalysisResult:
 
 def _result_has_fallback(result: ChunkAnalysisResult) -> bool:
     return any(line.brief_note == FALLBACK_TRANSLATION_NOTE for line in result.bilingual_lines)
+
+
+def _update_quality_metadata(document: AnalysisDocument) -> None:
+    review_items = [item for chunk in document.chunks for item in chunk.review_items]
+    review_segments = {
+        (chunk.chunk_id, item.segment_id)
+        for chunk in document.chunks
+        for item in chunk.review_items
+        if item.segment_id is not None
+    }
+    document.meta.review_items = len(review_items)
+    document.meta.review_segments = len(review_segments)
+    document.meta.unresolved_review_items = sum(1 for item in review_items if not item.auto_repaired)
+    if not document.meta.total_chunks or document.meta.failed_chunks >= document.meta.total_chunks:
+        document.meta.quality_status = "failed"
+    elif document.meta.failed_chunks or document.meta.fallback_lines:
+        document.meta.quality_status = "partial"
+    elif document.meta.unresolved_review_items or document.video_summary_error:
+        document.meta.quality_status = "complete_with_warnings"
+    else:
+        document.meta.quality_status = "complete"
 
 
 def _chunk_coverage_issues(result: ChunkAnalysisResult, chunk: AnalysisChunk) -> list[str]:

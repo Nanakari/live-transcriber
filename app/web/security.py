@@ -16,7 +16,7 @@ from ..utils import hidden_process_flags
 
 
 TEXT_EXTENSIONS = {".txt", ".md", ".json", ".srt", ".log", ".yaml", ".yml"}
-OPENABLE_EXTENSIONS = TEXT_EXTENSIONS | {".mp4", ".m4a", ".wav", ".mp3", ".jpg", ".jpeg", ".png", ".webp"}
+OPENABLE_EXTENSIONS = TEXT_EXTENSIONS | {".mp4", ".m4a", ".wav", ".mp3", ".jpg", ".jpeg", ".png", ".webp", ".cmd"}
 MAX_PREVIEW_BYTES = 256 * 1024
 
 

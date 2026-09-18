@@ -65,6 +65,11 @@ analysis:
   model: "gemini-3.5-flash-lite"
   fallback_model: "gemini-3.1-flash-lite"
   api_key_env: "GEMINI_API_KEY"
+  # This model is used only by the Skill-internal local Codex route.
+  local_model: "gpt-5.6-luna"
+  local_reasoning_effort: "medium"
+  local_ignore_user_config: true
+  local_concurrency: 4
   source_language: ""
   target_language: "zh"
   profile: "multilingual_study"
@@ -77,6 +82,9 @@ analysis:
   request_timeout_seconds: 300
   request_interval_seconds: 6
   cache_enabled: true
+  # 仅采用分析模型明确给出、且达到阈值的源语言修复候选；原始 ASR 永不覆盖。
+  auto_repair_enabled: true
+  auto_repair_threshold: 0.90
   output_formats:
     - "json"
     - "markdown"

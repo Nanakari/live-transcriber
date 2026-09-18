@@ -60,7 +60,7 @@
           <div class="module-checks">
             <label class="check"><input name="module_transcribe" type="checkbox" checked> 语音转写</label>
             <label class="check"><input name="module_analyze" type="checkbox" checked> 翻译与研析</label>
-            <label class="check"><input name="module_preview" type="checkbox" checked> 带字幕视频</label>
+            <label class="check"><input name="module_preview" type="checkbox" checked> 音频播放器 + 悬挂字幕</label>
           </div>
           <div class="row">
             <label>原文语言
@@ -82,6 +82,12 @@
                 <option value="cpu_safe">CPU 稳定</option>
                 <option value="fast">快速</option>
               </select>
+              </label>
+            <label>预览方式
+              <select name="preview_mode">
+                <option value="audio" selected>音频播放器（默认）</option>
+                <option value="video">字幕视频（按需）</option>
+              </select>
             </label>
           </div>
           <details class="nested-options">
@@ -101,7 +107,6 @@
               <label>计算类型 <input name="compute_type" value="" placeholder="自动选择"></label>
             </div>
             <div class="row">
-              <label>Provider <input name="provider" value="gemini"></label>
               <label>分析 Profile <input name="profile" value="multilingual_study"></label>
             </div>
             <div class="row">
@@ -275,7 +280,7 @@
               <button class="primary-action" type="submit" data-heavy>分析全部</button>
             </div>
             <details class="advanced"><summary>高级设置</summary>
-              <div class="row"><label>Provider <input name="provider" value="gemini"></label><label>分析 Profile <input name="profile" value="multilingual_study"></label></div>
+              <div class="row"><label>分析 Profile <input name="profile" value="multilingual_study"></label></div>
               <div class="row"><label>Gemini 模型 <input name="model" id="geminiModel" value="gemini-3.1-flash-lite"></label><label>仅处理前 N 段 <input name="limit_chunks" type="number" min="1" placeholder="留空为全部"></label></div>
               <label>Gemini API Key <input name="gemini_api_key" id="geminiApiKey" type="password" autocomplete="off" placeholder="默认仅保留在当前标签页"></label>
               <label class="check"><input name="character_profile" type="checkbox"> 生成人物档案（可选）</label>
@@ -286,10 +291,11 @@
 
         <section class="pane" id="previewPane">
           <form class="sub-form" id="previewForm">
-            <div class="panel-head"><div><h2>媒体预览</h2><p>把原始音频、封面和字幕整理为带烧录字幕的 通用 MP4 视频。</p></div></div>
+            <div class="panel-head"><div><h2>媒体预览</h2><p>默认生成音频播放器和底部悬挂字幕；选择视频模式时才编码带烧录字幕的 MP4。</p></div></div>
             <label>音频 <div class="picker-row"><select name="audio" id="audioSelect"></select><button class="browse-btn" type="button" data-browse-kind="audio" data-browse-target="audioSelect">选择文件</button></div></label>
             <label>中文字幕 <div class="picker-row"><select name="subtitle" id="subtitleSelect"></select><button class="browse-btn" type="button" data-browse-kind="subtitle" data-browse-target="subtitleSelect">选择文件</button></div></label>
-            <label>封面图 <div class="picker-row"><select name="cover" id="coverSelect"></select><button class="browse-btn" type="button" data-browse-kind="cover" data-browse-target="coverSelect">选择文件</button></div></label>
+            <label>预览方式 <select name="mode"><option value="audio" selected>音频播放器（默认）</option><option value="video">字幕视频（按需）</option></select></label>
+            <label>封面图（视频模式需要） <div class="picker-row"><select name="cover" id="coverSelect"></select><button class="browse-btn" type="button" data-browse-kind="cover" data-browse-target="coverSelect">选择文件</button></div></label>
             <details class="advanced"><summary>高级设置</summary><label>分辨率 <input name="resolution" value="1280x720"></label></details>
             <button class="primary-action" type="submit" data-heavy>生成预览包</button>
           </form>

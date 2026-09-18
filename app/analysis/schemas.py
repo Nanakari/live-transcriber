@@ -40,9 +40,15 @@ class BilingualLine(_StringCoerceModel):
     start: float = 0.0
     end: float = 0.0
     original: str = ""
+    corrected_original: str = ""
+    repair_confidence: float = 0.0
+    repair_reason: str = ""
+    auto_repaired: bool = False
     translation_zh: str
     literal_zh: str = ""
     brief_note: str = ""
+    review_required: bool = False
+    review_reason: str = ""
     asr_suspect: bool = False
     asr_issue: str = ""
     confidence: float = 0.0
@@ -79,6 +85,10 @@ class ReviewItem(_StringCoerceModel):
     start: Optional[float] = None
     end: Optional[float] = None
     original: str = ""
+    corrected_original: str = ""
+    repair_confidence: float = 0.0
+    repair_reason: str = ""
+    auto_repaired: bool = False
     reason_zh: str
     risk_type: str = ""
 
@@ -123,6 +133,7 @@ class AnalysisMeta(BaseModel):
     provider: str
     model: str
     fallback_model: str = ""
+    reasoning_effort: str = ""
     profile: str
     source_language: str
     target_language: str
@@ -135,6 +146,13 @@ class AnalysisMeta(BaseModel):
     skipped_chunks: int = 0
     fallback_chunks: int = 0
     fallback_lines: int = 0
+    quality_status: str = "complete"
+    review_items: int = 0
+    review_segments: int = 0
+    auto_repair_enabled: bool = True
+    auto_repair_threshold: float = 0.9
+    auto_repaired_lines: int = 0
+    unresolved_review_items: int = 0
 
 
 class FailedChunk(BaseModel):

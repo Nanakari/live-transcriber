@@ -39,7 +39,10 @@ def test_profile_request_is_absent_unless_enabled():
     assert "人物侧写" not in plain
     assert '"vocabulary"' in plain and '"chunk_summary_zh"' in plain
     assert '"grammar"' in plain and '"review_items"' in plain
+    assert '"review_required"' in plain and '"asr_suspect"' in plain
     assert '"literal_zh"' not in plain and '"brief_note"' not in plain
+    contextual = build_chunk_prompt(chunk(), media_context="视频标题：FUWAMOCO｜モココ", **kwargs)
+    assert "FUWAMOCO" in contextual and "モココ" in contextual
     assert "profile_observations" in build_chunk_prompt(chunk(), character_profile=True, **kwargs)
 
 
@@ -58,6 +61,41 @@ def test_cache_changes_with_text_language_and_features(tmp_path):
     assert before != cache_key(chunk=changed, parameters={"character_profile": False}, **args)
     assert before != cache_key(chunk=original, parameters={"character_profile": True}, **args)
     assert before != cache_key(chunk=original, parameters={"target_language": "ja"}, **args)
+
+
+def test_cache_key_does_not_depend_on_absolute_transcript_path(tmp_path):
+    original = chunk()
+    first = cache_key(
+        transcript_file=tmp_path / "one" / "source.json",
+        chunk=original,
+        model="model",
+        profile="study",
+        prompt_version="1",
+    )
+    second = cache_key(
+        transcript_file=tmp_path / "two" / "source.json",
+        chunk=original,
+        model="model",
+        profile="study",
+        prompt_version="1",
+    )
+    assert first == second
+
+
+def test_auto_language_loads_terms_and_video_metadata_into_initial_prompt(tmp_path):
+    terms = tmp_path / "terms.txt"
+    terms.write_text("モココ\nFUWAMOCO\n", encoding="utf-8")
+    prompt, warnings = utils.build_initial_prompt(
+        language="auto",
+        project_root=tmp_path,
+        default_terms_path=terms,
+        explicit_terms_file=None,
+        explicit_initial_prompt=None,
+        logger=utils.RunLogger(tmp_path / "run.log", mirror_stdout=False),
+        metadata_hint="FUWAMOCO｜モココからのお知らせ",
+    )
+    assert not warnings
+    assert "モココ" in prompt and "FUWAMOCO" in prompt
 
 
 def test_corrupt_cache_is_a_miss_and_can_be_replaced(tmp_path):
@@ -90,6 +128,29 @@ def test_core_analysis_exports_four_results_without_profile(isolated, monkeypatc
     assert all((result["output_dir"] / file).exists() for file in ("translation_zh.srt", "bilingual.md", "video_summary.md", "study_notes.md"))
     assert not (result["output_dir"] / "character_profile.md").exists()
     assert result["document"].chunks[0].profile_observations == []
+
+
+def test_review_items_make_a_successful_run_warning(isolated, monkeypatch):
+    class FakeClient:
+        def generate_json_text(self, *args, **kwargs):
+            return json.dumps({
+                "bilingual_lines": [{"segment_id": 1, "translation_zh": "你好"}],
+                "review_items": [{
+                    "segment_id": 1,
+                    "reason_zh": "专有名词可能需要核对",
+                    "risk_type": "ASR/专有名词",
+                }],
+            }, ensure_ascii=False)
+
+    monkeypatch.setattr(analyzer, "_make_client", lambda *_: FakeClient())
+    args = cli.build_parser().parse_args(["analyze", "--input", str(transcript_file(isolated))])
+    result = cli.analyze_task(args)
+
+    assert result["exit_code"] == 0
+    assert result["document"].meta.quality_status == "complete_with_warnings"
+    line = result["document"].chunks[0].bilingual_lines[0]
+    assert line.review_required is True
+    assert line.asr_suspect is True
 
 
 def test_all_failed_analysis_returns_failure_but_preserves_outputs(isolated, monkeypatch):
@@ -126,6 +187,21 @@ def test_frozen_data_does_not_depend_on_install_or_cwd(monkeypatch, tmp_path):
 def test_default_pipeline_includes_subtitled_preview():
     args = cli.build_parser().parse_args(["pipeline", "--input", "test.wav"])
     assert args.modules == "transcribe,analyze,preview"
+    assert args.preview_mode == "audio"
+    preview_args = cli.build_parser().parse_args([
+        "preview", "--audio", "audio.m4a", "--subtitle", "translation_zh.srt"
+    ])
+    assert preview_args.mode == "audio"
+
+
+def test_local_concurrency_defaults_to_four_and_accepts_override():
+    analyze_args = cli.build_parser().parse_args(["analyze", "--input", "input.json"])
+    pipeline_args = cli.build_parser().parse_args([
+        "pipeline", "--transcript", "input.json", "--modules", "analyze", "--local-concurrency", "7"
+    ])
+    assert analyze_args.local_concurrency is None
+    assert pipeline_args.local_concurrency == 7
+    assert analyzer.AnalyzeOptions.__dataclass_fields__["local_concurrency"].default == 4
 
 
 def test_web_no_key_fails_before_start_and_transcribe_still_allowed(isolated, monkeypatch):
@@ -156,7 +232,28 @@ def test_web_profile_flag_and_key_not_in_command(isolated, monkeypatch):
         assert response.status_code == 200
         assert "--character-profile" in captured["command"]
         assert "test-only-key" not in " ".join(captured["command"])
-        assert captured["env_overrides"]["GEMINI_API_KEY"] == "test-only-key"
+    assert captured["env_overrides"]["GEMINI_API_KEY"] == "test-only-key"
+
+
+def test_web_cannot_select_skill_internal_local_provider(isolated, monkeypatch):
+    captured = {}
+
+    def start(module, command, **kwargs):
+        captured["command"] = command
+        return Job(job_id="test", module=module, command=command)
+
+    monkeypatch.setattr(routes.jobs, "start", start)
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/analyze",
+            json={
+                "input": "sample.json",
+                "provider": "local",
+                "gemini_api_key": "test-only-key",
+            },
+        )
+    assert response.status_code == 200
+    assert captured["command"][captured["command"].index("--provider") + 1] == "gemini"
 
 
 def test_download_rejects_config_and_outside_files(isolated):

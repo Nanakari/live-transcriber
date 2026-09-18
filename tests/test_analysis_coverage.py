@@ -125,6 +125,33 @@ def test_missing_segments_are_requested_again_and_merged(tmp_path: Path) -> None
     assert _chunk_coverage_issues(result, chunk) == []
 
 
+def test_review_items_are_linked_back_to_bilingual_lines(tmp_path: Path) -> None:
+    client = FakeClient([
+        {
+            "bilingual_lines": [_line(1, "译文1"), _line(2, "译文2"), _line(3, "译文3")],
+            "review_items": [{
+                "segment_id": 2,
+                "reason_zh": "专有名词可能听错",
+                "risk_type": "ASR/专有名词",
+            }],
+        }
+    ])
+
+    result = _process_chunk(
+        client,
+        _chunk(),
+        _options(tmp_path),
+        "ja",
+        RunLogger(tmp_path / "run.log", mirror_stdout=False),
+    )
+
+    line = result.bilingual_lines[1]
+    assert line.review_required is True
+    assert line.review_reason == "专有名词可能听错"
+    assert line.asr_suspect is True
+    assert line.asr_issue == "专有名词可能听错"
+
+
 def test_invalid_json_is_repaired_before_chunk_is_skipped(tmp_path: Path) -> None:
     complete = {"bilingual_lines": [_line(index, f"译文{index}") for index in range(1, 4)]}
     client = RawFakeClient(["not-json", json.dumps(complete, ensure_ascii=False)])

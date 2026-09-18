@@ -240,10 +240,14 @@ class JobManager:
                 job.progress = {**job.progress, "label": "已取消"}
             else:
                 job.status = "succeeded" if job.returncode == 0 else "failed"
+                if job.returncode == 0 and job.analysis_status.get("quality_status") == "complete_with_warnings":
+                    job.status = "complete_with_warnings"
                 if job.returncode == 2 and job.analysis_status:
                     job.status = "partial"
                 if job.status == "succeeded":
                     job.progress = {"percent": 100, "label": "已完成", "detail": ""}
+                elif job.status == "complete_with_warnings":
+                    job.progress = {"percent": 100, "label": "完成但需复查", "detail": "请查看复查清单"}
                 elif job.status == "failed":
                     job.progress = {**job.progress, "label": "失败"}
                 elif job.status == "partial":
@@ -429,6 +433,8 @@ def update_analyze_progress(job: Job, line: str) -> None:
 def update_preview_progress(job: Job, line: str) -> None:
     if "ffmpeg" in line.lower():
         job.progress = {"percent": 55, "label": "生成预览视频", "detail": "ffmpeg"}
+    elif "音频播放器" in line or "audio_subtitle_player" in line:
+        job.progress = {"percent": 55, "label": "生成音频播放器", "detail": "悬挂字幕"}
     elif "PotPlayer" in line or "预览" in line:
         job.progress = {"percent": 20, "label": "准备预览文件", "detail": ""}
 

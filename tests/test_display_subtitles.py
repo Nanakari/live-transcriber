@@ -29,7 +29,10 @@ def test_ass_uses_readable_style_and_escapes_override_commands(tmp_path):
     write_display_subtitles([cue(0.34, 5.98, r"{\an8}text")], srt, ass)
     text = ass.read_text(encoding="utf-8")
     assert "Microsoft YaHei,28" in text
-    assert "&HA0000000" in text
+    assert "&H00141414" in text
+    assert "&HFF000000" in text
+    assert r"{\c&H00FFFFFF&}" in text
+    assert r"{\c&H004DD8FF&}" in text
     assert "0:00:00.34,0:00:05.98" in text
     assert r"{\an8}" not in text
     assert "00:00:00,340 --> 00:00:05,980" in srt.read_text(encoding="utf-8")

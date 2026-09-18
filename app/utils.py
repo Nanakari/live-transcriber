@@ -5,6 +5,7 @@ import shutil
 import string
 import subprocess
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -35,14 +36,16 @@ class RunLogger:
         self.log_file = log_file
         self.debug = debug
         self.mirror_stdout = mirror_stdout
+        self._lock = threading.Lock()
 
     def write(self, message: str) -> None:
-        timestamp = datetime.now().isoformat(timespec="seconds")
-        self.log_file.parent.mkdir(parents=True, exist_ok=True)
-        with self.log_file.open("a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {message}\n")
-        if self.mirror_stdout:
-            print(f"[detail] {message}", flush=True)
+        with self._lock:
+            timestamp = datetime.now().isoformat(timespec="seconds")
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_file.open("a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {message}\n")
+            if self.mirror_stdout:
+                print(f"[detail] {message}", flush=True)
 
 
 def ensure_dir(path: Path) -> None:
@@ -247,13 +250,14 @@ def build_initial_prompt(
     explicit_terms_file: Optional[str],
     explicit_initial_prompt: Optional[str],
     logger: RunLogger,
+    metadata_hint: Optional[str] = None,
 ) -> tuple[str, list[str]]:
     warnings: list[str] = []
     parts: list[str] = []
     if explicit_initial_prompt:
         parts.append(explicit_initial_prompt.strip())
 
-    should_load_default_terms = language == "ja" and not explicit_terms_file
+    should_load_default_terms = language in {"ja", "auto"} and not explicit_terms_file
     terms_path: Optional[Path] = None
     if explicit_terms_file:
         terms_path = Path(explicit_terms_file).expanduser()
@@ -276,6 +280,12 @@ def build_initial_prompt(
                     "次の固有名詞や用語が含まれる可能性があります：\n"
                     + joined_terms
                 )
+
+    if metadata_hint and metadata_hint.strip():
+        parts.append(
+            "视频元信息仅用于辅助识别专有名词；不要把标题当作要转写的句子：\n"
+            + metadata_hint.strip()[:300]
+        )
 
     prompt = "\n".join(part for part in parts if part)
     if len(prompt) > 600:
