@@ -12,11 +12,12 @@ and tool source locations. The release build collects these automatically.
 - CTranslate2: https://github.com/OpenNMT/CTranslate2
 - yt-dlp: https://github.com/yt-dlp/yt-dlp
 - Node.js: https://github.com/nodejs/node — its license includes third-party notices.
-- FFmpeg: https://ffmpeg.org/legal.html — the Windows executable supplied by
-  imageio-ffmpeg 0.6.0 is a separate program. See `FFmpeg-build.txt`, the copied
-  GPL/LGPL texts and `tools.json` in the release. Upstream FFmpeg 7.1 source:
-  https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz. The binary build project and
-  build scripts are at https://github.com/imageio/imageio-binaries/tree/master/ffmpeg.
+- Tcl/Tk: https://www.tcl.tk/software/tcltk/license.html — bundled for the subtitle player.
+- FFmpeg, ffplay and ffprobe: https://ffmpeg.org/legal.html — separate programs
+  supplied by Gyan's verified FFmpeg 8.1.2 essentials build. See `FFmpeg-build.txt`,
+  the copied GPL/LGPL texts and `tools.json` in the release. Upstream source:
+  https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz. Build distribution and notices:
+  https://github.com/GyanD/codexffmpeg/releases/tag/8.1.2.
 
 Whisper model weights are downloaded separately. Their model cards and licenses
 apply. The release contains no user media, cookies, API keys, transcriptions,

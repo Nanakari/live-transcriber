@@ -11,7 +11,7 @@
 3. 在“设置”中填写自己的 Gemini API Key；或先点击“仅转写”。
 4. 导入文件或链接，点击“开始处理”，在结果页阅读或导出。
 
-发行包包含 Python 运行时、ffmpeg、yt-dlp 和 Node.js；保留整个文件夹及 `_internal` 子目录。GitHub 自动提供的 **Source code ZIP 是源码，不是可执行程序包**。如果尚无 Release，请使用下方源码安装。
+发行包包含 Python/Tkinter 运行时、ffmpeg、ffplay、ffprobe、yt-dlp 和 Node.js，无需另装 Python 即可运行音频字幕播放器。保留整个文件夹及 `_internal` 子目录。GitHub 自动提供的 **Source code ZIP 是源码，不是可执行程序包**。
 
 Windows 发行包以 CPU 为兼容基线，不包含 CUDA 运行库或语音模型。首次转写需要联网下载模型并留出足够磁盘空间；页面显示下载阶段，失败后可重新开始。缓存完整后，仅转写可以离线使用。高质量模型在 CPU 上可能较慢，首次使用建议选择“快速”。
 

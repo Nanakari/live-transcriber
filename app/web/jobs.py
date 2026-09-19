@@ -210,17 +210,17 @@ class JobManager:
 
     def _run_job(self, job: Job) -> None:
         start_time = datetime.now()
-        job.started_at = start_time.isoformat(timespec="seconds")
-        job.stage_started_at = job.started_at
-        job.progress_updated_at = job.started_at
-        job.status = "running"
-        job.progress = {"percent": 2, "label": "启动任务", "detail": ""}
-        self._append_log(job, "COMMAND: " + " ".join(job.command))
-        env = os.environ.copy()
-        env.update(job.env_overrides)
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUNBUFFERED"] = "1"
         try:
+            job.started_at = start_time.isoformat(timespec="seconds")
+            job.stage_started_at = job.started_at
+            job.progress_updated_at = job.started_at
+            job.status = "running"
+            job.progress = {"percent": 2, "label": "启动任务", "detail": ""}
+            self._append_log(job, "COMMAND: " + " ".join(job.command))
+            env = os.environ.copy()
+            env.update(job.env_overrides)
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUNBUFFERED"] = "1"
             with self._lock:
                 if job.cancelled.is_set():
                     job.status = "stopped"
@@ -258,15 +258,27 @@ class JobManager:
             job.status = "failed"
             job.error = str(exc)
             job.progress = {**job.progress, "label": "失败"}
-            self._append_log(job, f"ERROR: {exc}")
+            if job.proc is not None:
+                try:
+                    terminate_process_tree(job.proc)
+                except Exception:
+                    pass
+            try:
+                self._append_log(job, f"ERROR: {exc}")
+            except Exception:
+                pass  # The log itself may be unavailable (for example, disk full).
         finally:
             job.env_overrides.clear()
             job.finished_at = datetime.now().isoformat(timespec="seconds")
-            if not job.output_dir:
-                job.output_dir = guess_output_dir(job.module, start_time)
-            with self._lock:
-                if self._heavy_running == job.job_id:
-                    self._heavy_running = None
+            try:
+                if not job.output_dir:
+                    job.output_dir = guess_output_dir(job.module, start_time)
+            except OSError:
+                pass  # Output discovery must not prevent releasing the job slot.
+            finally:
+                with self._lock:
+                    if self._heavy_running == job.job_id:
+                        self._heavy_running = None
 
 
 def guess_output_dir(module: str, start_time: datetime) -> str | None:

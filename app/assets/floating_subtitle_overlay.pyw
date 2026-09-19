@@ -744,6 +744,8 @@ def find_ffplay(explicit: Path | None = None) -> Path:
     candidates: list[Path] = []
     if explicit:
         candidates.append(explicit.expanduser())
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys._MEIPASS) / "tools" / "ffplay.exe")
     environment_path = os.environ.get("LIVE_TRANSCRIBER_FFPLAY", "").strip()
     if environment_path:
         candidates.append(Path(environment_path))
@@ -875,6 +877,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="播完后从时间轴开头循环",
     )
+    parser.add_argument("--check-runtime", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -911,6 +914,21 @@ def main() -> int:
                 duration=duration,
                 loop=args.loop,
             )
+        if args.check_runtime:
+            root = tk.Tk()
+            root.withdraw()
+            root.update()
+            root.destroy()
+            if audio_player is not None:
+                process = start_audio(audio_path, ffplay_path, 0)
+                try:
+                    if process.wait(timeout=15) != 0:
+                        raise RuntimeError("Audio playback smoke check failed")
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+            return 0
         FloatingSubtitleOverlay(
             cues,
             start_offset=args.start,
@@ -919,7 +937,8 @@ def main() -> int:
         ).run()
         return 0
     except Exception as exc:
-        show_error(str(exc))
+        if not args.check_runtime:
+            show_error(str(exc))
         return 1
     finally:
         if audio_player is not None:

@@ -21,6 +21,7 @@ datas = [
     (str(root / 'app/web/static/classic.css'), 'app/web/static'),
     (str(root / 'app/web/static/classic.js'), 'app/web/static'),
     (str(root / 'app/assets/neutral_cover.png'), 'app/assets'),
+    (str(root / 'app/assets/floating_subtitle_overlay.pyw'), 'app/assets'),
     (str(root / 'dictionaries'), 'dictionaries'),
     (str(stage / 'licenses'), 'licenses'),
 ]
@@ -32,11 +33,18 @@ hidden = ['app.web.server', 'app.web.routes', 'app.web.jobs', 'uvicorn.logging',
           'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on']
 hidden += collect_submodules('yt_dlp')
 a = Analysis([str(root / 'main.py')], pathex=[str(root)],
-    binaries=runtime + [(str(stage / 'tools/ffmpeg.exe'), 'tools'), (str(stage / 'tools/node.exe'), 'tools')],
+    binaries=runtime + [(str(stage / 'tools/ffmpeg.exe'), 'tools'), (str(stage / 'tools/node.exe'), 'tools'),
+                        (str(stage / 'tools/ffplay.exe'), 'tools'), (str(stage / 'tools/ffprobe.exe'), 'tools')],
     datas=datas, hiddenimports=hidden, excludes=['nvidia', 'torch', 'pytest', 'tkinter'],
     noarchive=False, optimize=0)
 pyz = PYZ(a.pure)
 # A console-capable worker is essential for capturing task output. start.bat hides the UI launcher.
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='LiveTranscriber',
           debug=False, strip=False, upx=False, console=True)
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='LiveTranscriber')
+player_analysis = Analysis([str(root / 'app/assets/floating_subtitle_overlay.pyw')],
+                          pathex=[str(root)], binaries=runtime, datas=[], hiddenimports=[])
+player_pyz = PYZ(player_analysis.pure)
+player = EXE(player_pyz, player_analysis.scripts, [], exclude_binaries=True,
+             name='LiveTranscriberPlayer', debug=False, strip=False, upx=False, console=False)
+coll = COLLECT(exe, player, a.binaries, a.datas, player_analysis.binaries, player_analysis.datas,
+               strip=False, upx=False, name='LiveTranscriber')

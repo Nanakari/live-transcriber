@@ -446,6 +446,8 @@ def transcribe_task(args: argparse.Namespace) -> dict[str, Path]:
     for path in completed_paths:
         _print(f"- {path}")
     result = {"transcript": transcript_json, "audio": source_audio, "output_dir": group_dir}
+    if defer_temp_cleanup and not record_clean_audio:
+        result["temporary_clean_audio"] = clean_audio
     print("ARTIFACT_RESULT " + json.dumps({key: str(value) for key, value in result.items()}), flush=True)
     return result
 
@@ -644,6 +646,7 @@ def handle_pipeline(args: argparse.Namespace) -> int:
     audio: Path | None = Path(args.audio).expanduser() if args.audio else None
     subtitle: Path | None = Path(args.subtitle).expanduser() if args.subtitle else None
     exit_code = 0
+    generated_wavs: list[Path] = []
 
     if "transcribe" in modules and not args.url and not args.input:
         raise AppError("模块一需要视频 URL 或本地音频/视频路径。")
@@ -685,6 +688,8 @@ def handle_pipeline(args: argparse.Namespace) -> int:
         transcribed = transcribe_task(transcribe_args)
         transcript = transcribed["transcript"]
         audio = transcribed["audio"]
+        if transcribed.get("temporary_clean_audio"):
+            generated_wavs.append(transcribed["temporary_clean_audio"])
         _print(f"[pipeline] transcript={transcript}")
 
     if "analyze" in modules:
@@ -744,15 +749,17 @@ def handle_pipeline(args: argparse.Namespace) -> int:
         preview_result = _create_preview(preview_args)
         _print_preview_result(preview_result)
 
-    deleted_wavs = _cleanup_generated_pipeline_wavs(transcript, audio)
+    deleted_wavs = _cleanup_generated_pipeline_wavs(transcript, audio, generated_wavs=generated_wavs)
     for deleted_wav in deleted_wavs:
         _print(f"[pipeline] 已删除中间 WAV：{deleted_wav}")
     _print("[pipeline] 完整处理完成。" if exit_code == 0 else "[pipeline] 部分完成，请复查缺失的翻译。")
     return exit_code
 
 
-def _cleanup_generated_pipeline_wavs(transcript: Path | None, audio: Path | None) -> list[Path]:
-    """Delete only reproducible clean WAV intermediates after a successful pipeline."""
+def _cleanup_generated_pipeline_wavs(
+    transcript: Path | None, audio: Path | None, *, generated_wavs: list[Path] | None = None,
+) -> list[Path]:
+    """Delete only this run's disposable WAVs, never the player's audio input."""
     group_dir = None
     for artifact in (transcript, audio):
         if artifact:
@@ -766,7 +773,12 @@ def _cleanup_generated_pipeline_wavs(transcript: Path | None, audio: Path | None
     if not audio_dir.exists():
         return []
     deleted: list[Path] = []
-    for path in audio_dir.glob("*_clean_16k.wav"):
+    for path in generated_wavs or []:
+        path = path.resolve()
+        if path.parent != audio_dir.resolve() or not path.name.endswith("_clean_16k.wav"):
+            continue
+        if audio is not None and path == audio.resolve():
+            continue
         try:
             path.unlink(missing_ok=True)
             if not path.exists():

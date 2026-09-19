@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 
@@ -60,10 +61,24 @@ def write_audio_subtitle_player(target: Path, audio: Path, subtitle: Path) -> Pa
     return _write_overlay_script(target, subtitle, audio)
 
 
-def write_overlay_launcher(target: Path, script_name: str) -> Path:
+def write_overlay_launcher(target: Path, script_name: str, *, subtitle: Path | None = None, audio: Path | None = None) -> Path:
     """Write a Windows launcher so the generated player is clickable without .pyw association."""
     target = target.expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
+    if getattr(sys, "frozen", False):
+        if subtitle is None:
+            raise ValueError("Packaged player requires a subtitle path")
+        player = Path(sys.executable).with_name("LiveTranscriberPlayer.exe")
+        def argument(path: Path) -> str:
+            return '"' + str(path.resolve()).replace("%", "%%") + '"'
+        arguments = f"--srt {argument(subtitle)}"
+        if audio is not None:
+            arguments += f" --audio {argument(audio)}"
+        else:
+            arguments += " --no-audio"
+        content = f'@echo off\nchcp 65001 >nul\nsetlocal\nstart "" {argument(player)} {arguments} %*\nexit /b 0\n'
+        target.write_text(content, encoding="utf-8", newline="\r\n")
+        return target
     project_pythonw = Path(__file__).resolve().parents[1] / ".venv" / "Scripts" / "pythonw.exe"
     try:
         pythonw_reference = os.path.relpath(project_pythonw, target.parent.resolve()).replace("/", "\\")

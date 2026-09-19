@@ -53,3 +53,18 @@ def test_generated_audio_launcher_points_to_pythonw_player(tmp_path: Path) -> No
     assert 'set "PYTHONW=' in content
     assert content.lower().rstrip().endswith("exit /b 0")
     assert 'start "" "%PYTHONW%" "%SCRIPT%" %*' in content
+
+
+def test_packaged_launcher_uses_bundled_player(monkeypatch, tmp_path):
+    import sys
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "LiveTranscriber.exe"))
+    audio = tmp_path / "audio.wav"
+    subtitle = tmp_path / "subtitle.srt"
+    target = tmp_path / "play.cmd"
+    write_overlay_launcher(target, AUDIO_PLAYER_FILENAME, subtitle=subtitle, audio=audio)
+    text = target.read_text(encoding="utf-8")
+    assert "LiveTranscriberPlayer.exe" in text
+    assert "pythonw" not in text
+    assert f'--audio "{audio.resolve()}"' in text
+    assert f'--srt "{subtitle.resolve()}"' in text

@@ -108,7 +108,7 @@ def create_audio_preview(options: PreviewOptions) -> dict[str, Path]:
     audio_player_path = output_dir / AUDIO_PLAYER_FILENAME
     write_audio_subtitle_player(audio_player_path, audio, audio_mode_subtitle)
     audio_player_launcher_path = output_dir / AUDIO_PLAYER_LAUNCHER_FILENAME
-    write_overlay_launcher(audio_player_launcher_path, audio_player_path.name)
+    write_overlay_launcher(audio_player_launcher_path, audio_player_path.name, subtitle=audio_mode_subtitle, audio=audio)
     audio_readme_path = output_dir / "README_play.txt"
     write_audio_readme(
         audio_readme_path,
@@ -207,7 +207,7 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
     floating_overlay_path = output_dir / options.floating_overlay_name
     write_floating_subtitle_overlay(floating_overlay_path, display_srt)
     floating_overlay_launcher_path = output_dir / OVERLAY_LAUNCHER_FILENAME
-    write_overlay_launcher(floating_overlay_launcher_path, floating_overlay_path.name)
+    write_overlay_launcher(floating_overlay_launcher_path, floating_overlay_path.name, subtitle=display_srt)
     group = group_dir_from_artifact_path(subtitle) or group_dir_from_artifact_path(audio)
     audio_output_dir = (group / "audio") if group else (output_dir / "audio")
     audio_output_dir.mkdir(parents=True, exist_ok=True)
@@ -216,7 +216,7 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
     audio_player_path = audio_output_dir / AUDIO_PLAYER_FILENAME
     write_audio_subtitle_player(audio_player_path, audio, audio_mode_subtitle)
     audio_player_launcher_path = audio_output_dir / AUDIO_PLAYER_LAUNCHER_FILENAME
-    write_overlay_launcher(audio_player_launcher_path, audio_player_path.name)
+    write_overlay_launcher(audio_player_launcher_path, audio_player_path.name, subtitle=audio_mode_subtitle, audio=audio)
     audio_readme_path = audio_output_dir / "README_play.txt"
     write_audio_readme(
         audio_readme_path,

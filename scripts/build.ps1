@@ -1,4 +1,4 @@
-param([string]$Version = '0.2.3', [switch]$SkipInstall)
+param([string]$Version = '0.2.4', [switch]$SkipInstall)
 $ErrorActionPreference = 'Stop'
 $projectDir = Split-Path $PSScriptRoot -Parent
 if ($Version -notmatch '^[0-9A-Za-z][0-9A-Za-z._-]*$') { throw 'Invalid version label.' }

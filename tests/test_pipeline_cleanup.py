@@ -56,7 +56,7 @@ def test_pipeline_cleanup_removes_only_generated_clean_wav(
     transcript.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(cli, "group_dir_from_artifact_path", lambda path: group)
 
-    deleted = cli._cleanup_generated_pipeline_wavs(transcript, source_wav)
+    deleted = cli._cleanup_generated_pipeline_wavs(transcript, source_wav, generated_wavs=[clean_wav])
 
     assert deleted == [clean_wav]
     assert not clean_wav.exists()
@@ -73,6 +73,43 @@ def test_cleanup_empty_staging_removes_empty_descendants(tmp_path: Path, monkeyp
     cli.cleanup_empty_staging(staging)
 
     assert not staging.exists()
+
+
+def test_audio_preview_keeps_its_clean_wav_input(monkeypatch, tmp_path):
+    monkeypatch.setenv("LIVE_TRANSCRIBER_HOME", str(tmp_path))
+    group = tmp_path / "outputs" / "media" / "sample"
+    audio = group / "audio" / "sample_clean_16k.wav"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"audio")
+    subtitle = group / "translation.srt"
+    subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    args = cli.build_parser().parse_args([
+        "pipeline", "--modules", "preview", "--audio", str(audio),
+        "--subtitle", str(subtitle), "--preview-mode", "audio",
+    ])
+    assert cli.handle_pipeline(args) == 0
+    assert audio.exists()
+    assert (audio.parent / "audio_subtitle_player.pyw").exists()
+    assert cli._cleanup_generated_pipeline_wavs(None, audio, generated_wavs=[audio]) == []
+    assert audio.exists()
+
+
+@pytest.mark.parametrize("retain", [False, True])
+def test_pipeline_honors_clean_wav_retention(monkeypatch, tmp_path, retain):
+    from copy import deepcopy
+    from app.config import DEFAULT_CONFIG
+    monkeypatch.setenv("LIVE_TRANSCRIBER_HOME", str(tmp_path))
+    config = deepcopy(DEFAULT_CONFIG)
+    config["audio"]["delete_clean_wav_after_transcribe"] = not retain
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "normalize_device_compute", lambda **kw: ("cpu", "int8", []))
+    monkeypatch.setattr(cli, "convert_to_clean_wav", lambda source, target, logger: target.write_bytes(b"clean"))
+    monkeypatch.setattr(cli, "transcribe_audio", lambda **kw: ([], {}))
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"audio")
+    args = cli.build_parser().parse_args(["pipeline", "--modules", "transcribe", "--input", str(source)])
+    assert cli.handle_pipeline(args) == 0
+    assert bool(list((tmp_path / "outputs" / "media").rglob("*_clean_16k.wav"))) == retain
 
 
 def test_pipeline_preserves_source_m4a_even_with_legacy_cleanup_setting(monkeypatch, tmp_path):
@@ -97,7 +134,7 @@ def test_pipeline_preserves_source_m4a_even_with_legacy_cleanup_setting(monkeypa
     assert cli.handle_pipeline(args) == 0
     assert source.read_bytes() == b"test"
     assert video.exists()
-    assert not clean.exists()
+    assert clean.exists()  # A preview-only run must not delete earlier intermediates.
 
 
 def test_clean_segments_repairs_extreme_stretched_tail_timestamp() -> None:

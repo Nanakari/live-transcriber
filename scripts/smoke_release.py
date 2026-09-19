@@ -43,6 +43,21 @@ def main() -> None:
         assert (video_dir / "live_preview.mp4").stat().st_size > 0
         assert (video_dir / "subtitles" / "display.bilingual.ass").exists()
         assert (video_dir / "assets" / "manifest.json").exists()
+        # Exercise the default audio workflow and its bundled GUI/audio runtime.
+        audio_dir = media / "audio-player"
+        subprocess.run(
+            [str(executable), "preview", "--mode", "audio", "--audio", str(media / "audio.wav"),
+             "--subtitle", str(media / "translation.srt"), "--output-dir", str(audio_dir)],
+            env=env, cwd=directory, check=True, capture_output=True, timeout=60, creationflags=flags,
+        )
+        launcher = (audio_dir / "run_audio_subtitle_player.cmd").read_text(encoding="utf-8")
+        assert "LiveTranscriberPlayer.exe" in launcher and "pythonw" not in launcher
+        player_env = dict(env, SDL_AUDIODRIVER="dummy")
+        subprocess.run(
+            [str(release / "LiveTranscriberPlayer.exe"), "--srt", str(audio_dir / "audio_mode.bilingual.srt"),
+             "--audio", str(media / "audio.wav"), "--check-runtime"],
+            env=player_env, cwd=directory, check=True, timeout=60, creationflags=flags,
+        )
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
