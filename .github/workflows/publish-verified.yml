@@ -1,0 +1,79 @@
+name: Publish verified Windows artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Windows release workflow run
+        required: true
+      tag:
+        description: Existing draft release tag
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_RUN: ${{ inputs.run_id }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Verify build and draft commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh run view "$SOURCE_RUN" --json conclusion,headSha,workflowName > run.json
+          gh release view "$RELEASE_TAG" --json isDraft,targetCommitish > release.json
+          SHA=$(jq -r .headSha run.json)
+          gh api "repos/$GH_REPO/actions/runs?head_sha=$SHA&per_page=100" > checks.json
+          python3 - <<'PY'
+          import json
+          run = json.load(open('run.json'))
+          release = json.load(open('release.json'))
+          checks = json.load(open('checks.json'))['workflow_runs']
+          assert run['conclusion'] == 'success' and run['workflowName'] == 'Windows release'
+          assert release['isDraft'] and release['targetCommitish'] == run['headSha']
+          assert any(item['name'] == 'CI' and item['conclusion'] == 'success' for item in checks)
+          PY
+      - name: Download and verify release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$SOURCE_RUN" --name windows-release --dir incoming
+          python3 - <<'PY'
+          import hashlib, os, shutil, zipfile
+          from pathlib import Path
+          archives = list(Path('incoming').glob('*.zip'))
+          assert len(archives) == 1
+          archive = archives[0]
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          assert digest == Path(str(archive) + '.sha256').read_text().split()[0]
+          with zipfile.ZipFile(archive) as bundle:
+              assert bundle.testzip() is None
+              names = set(bundle.namelist())
+              for name in ('LiveTranscriber.exe', 'LiveTranscriberPlayer.exe', 'start.bat',
+                           '_internal/tools/ffmpeg.exe', '_internal/tools/ffplay.exe',
+                           '_internal/tools/ffprobe.exe', '_internal/tools/node.exe',
+                           '_internal/app/assets/floating_subtitle_overlay.pyw'):
+                  assert 'LiveTranscriber/' + name in names, name
+              assert not any(Path(name).name in {'secrets.local.env', 'config.local.yaml', '.env'} for name in names)
+          Path('publish').mkdir()
+          target = Path('publish') / f"LiveTranscriber-{os.environ['RELEASE_TAG']}-windows-x64.zip"
+          shutil.copyfile(archive, target)
+          Path(str(target) + '.sha256').write_text(f'{digest}  {target.name}\n', encoding='ascii')
+          print(f'Verified {target.name}: {digest}')
+          PY
+      - name: Upload and publish verified draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" publish/*
+          gh release edit "$RELEASE_TAG" --draft=false --latest
