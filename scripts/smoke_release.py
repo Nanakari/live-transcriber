@@ -35,7 +35,7 @@ def main() -> None:
         (media / "translation.srt").write_text("1\n00:00:00,000 --> 00:00:00,900\n字幕测试\n", encoding="utf-8")
         video_dir = media / "video"
         result = subprocess.run(
-            [str(executable), "preview", "--audio", str(media / "audio.wav"), "--subtitle", str(media / "translation.srt"),
+            [str(executable), "preview", "--mode", "video", "--audio", str(media / "audio.wav"), "--subtitle", str(media / "translation.srt"),
              "--cover", str(media / "cover.png"), "--output-dir", str(video_dir), "--resolution", "320x180"],
             env=env, cwd=directory, capture_output=True, timeout=60, creationflags=flags,
         )
