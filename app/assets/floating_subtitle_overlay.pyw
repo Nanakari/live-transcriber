@@ -744,6 +744,11 @@ def find_ffplay(explicit: Path | None = None) -> Path:
     candidates: list[Path] = []
     if explicit:
         candidates.append(explicit.expanduser())
+    script_dir = Path(__file__).resolve().parent
+    candidates.extend([
+        script_dir / "assets" / "ffplay.exe",
+        script_dir / "assets" / "ffplay",
+    ])
     if getattr(sys, "frozen", False):
         candidates.append(Path(sys._MEIPASS) / "tools" / "ffplay.exe")
     environment_path = os.environ.get("LIVE_TRANSCRIBER_FFPLAY", "").strip()
@@ -765,6 +770,11 @@ def find_ffplay(explicit: Path | None = None) -> Path:
 
 def find_ffprobe(ffplay_path: Path | None = None) -> Path | None:
     candidates: list[Path] = []
+    script_dir = Path(__file__).resolve().parent
+    candidates.extend([
+        script_dir / "assets" / "ffprobe.exe",
+        script_dir / "assets" / "ffprobe",
+    ])
     environment_path = os.environ.get("LIVE_TRANSCRIBER_FFPROBE", "").strip()
     if environment_path:
         candidates.append(Path(environment_path))

@@ -1,8 +1,116 @@
 from __future__ import annotations
 
-from typing import Optional
+import math
+from typing import Any, Literal, Mapping, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+TRANSLATION_STATUS_TRANSLATED = "translated"
+TRANSLATION_STATUS_MISSING = "missing"
+TRANSLATION_STATUS_BLOCKED_ASR_REVIEW = "blocked_asr_review"
+TranslationStatus = Literal[
+    TRANSLATION_STATUS_TRANSLATED,
+    TRANSLATION_STATUS_MISSING,
+    TRANSLATION_STATUS_BLOCKED_ASR_REVIEW,
+]
+_LEGACY_FALLBACK_PREFIX = "[翻译暂缺]"
+_LEGACY_FALLBACK_NOTE = "模型未返回翻译，已使用原文占位"
+INVALID_REPAIR_CONFIDENCE_MARKER = "无效修复置信度"
+
+
+def normalize_repair_confidence(value: Any) -> tuple[float, bool]:
+    """Return a finite repair confidence and whether the input was valid.
+
+    Model output must remain parseable even when a provider emits ``NaN``, an
+    infinity, or a value outside the documented range.  Invalid values become
+    zero (no evidence), while callers can use the boolean to keep the repair
+    pending and the reason field records the original value.
+    """
+    if isinstance(value, bool):
+        return 0.0, False
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0, False
+    if not math.isfinite(normalized) or not 0.0 <= normalized <= 1.0:
+        return 0.0, False
+    return normalized, True
+
+
+def invalid_repair_confidence_note(value: Any) -> str:
+    try:
+        display = repr(value)
+    except Exception:
+        display = "<unprintable>"
+    if len(display) > 80:
+        display = display[:77] + "..."
+    return f"{INVALID_REPAIR_CONFIDENCE_MARKER}（原值：{display}）"
+
+
+def repair_reason_with_confidence_note(reason: Any, value: Any) -> str:
+    text = str(reason or "").strip()
+    if INVALID_REPAIR_CONFIDENCE_MARKER in text:
+        return text
+    note = invalid_repair_confidence_note(value)
+    return f"{note}；{text}" if text else note
+
+
+def has_invalid_repair_confidence_note(reason: Any) -> bool:
+    return INVALID_REPAIR_CONFIDENCE_MARKER in str(reason or "")
+
+
+def _asr_suspect_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().casefold() in {"true", "1", "yes", "是"}
+
+
+def is_missing_translation_payload(translation_zh: Any, brief_note: Any = "") -> bool:
+    text = str(translation_zh or "")
+    note = str(brief_note or "")
+    return (
+        not text.strip()
+        or _has_legacy_fallback_marker(text, note)
+    )
+
+
+def _has_legacy_fallback_marker(translation_zh: Any, brief_note: Any = "") -> bool:
+    text = str(translation_zh or "")
+    note = str(brief_note or "")
+    return (
+        text.lstrip().startswith(_LEGACY_FALLBACK_PREFIX)
+        or note.strip() == _LEGACY_FALLBACK_NOTE
+    )
+
+
+def _legacy_translation_status(data: Mapping[str, Any]) -> TranslationStatus:
+    """Infer status only for input that predates the program-owned field.
+
+    The presence of the field is the provenance boundary.  Explicit
+    ``missing`` is retryable even when ASR is suspect; only old fallback rows
+    with no status field are quarantined as blocked when ASR is suspect.
+    """
+    if "translation_status" in data:
+        value = data.get("translation_status")
+        if isinstance(value, str) and value in {
+            TRANSLATION_STATUS_TRANSLATED,
+            TRANSLATION_STATUS_MISSING,
+            TRANSLATION_STATUS_BLOCKED_ASR_REVIEW,
+        }:
+            return value
+        return TRANSLATION_STATUS_MISSING
+    if not is_missing_translation_payload(data.get("translation_zh"), data.get("brief_note")):
+        return TRANSLATION_STATUS_TRANSLATED
+    if not _has_legacy_fallback_marker(data.get("translation_zh"), data.get("brief_note")):
+        return TRANSLATION_STATUS_MISSING
+    return (
+        TRANSLATION_STATUS_BLOCKED_ASR_REVIEW
+        if _asr_suspect_value(data.get("asr_suspect"))
+        else TRANSLATION_STATUS_MISSING
+    )
 
 
 class _StringCoerceModel(BaseModel):
@@ -52,6 +160,47 @@ class BilingualLine(_StringCoerceModel):
     asr_suspect: bool = False
     asr_issue: str = ""
     confidence: float = 0.0
+    # This field is owned by the analysis program.  It is intentionally
+    # removed from model output schemas and ignored on fresh model responses;
+    # persisted caches use it to distinguish recoverable omissions from ASR
+    # lines that must stay blocked pending human review.
+    translation_status: TranslationStatus = TRANSLATION_STATUS_TRANSLATED
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_program_owned_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        if "translation_status" not in normalized:
+            normalized["translation_status"] = _legacy_translation_status(normalized)
+        raw_confidence = normalized.get("repair_confidence", 0.0)
+        confidence, valid = normalize_repair_confidence(raw_confidence)
+        normalized["repair_confidence"] = confidence
+        if not valid:
+            normalized["repair_reason"] = repair_reason_with_confidence_note(
+                normalized.get("repair_reason", ""),
+                raw_confidence,
+            )
+        return normalized
+
+    @field_validator("translation_status", mode="before")
+    @classmethod
+    def _normalize_translation_status(cls, value):
+        if isinstance(value, str) and value in {
+            TRANSLATION_STATUS_TRANSLATED,
+            TRANSLATION_STATUS_MISSING,
+            TRANSLATION_STATUS_BLOCKED_ASR_REVIEW,
+        }:
+            return value
+        # A malformed persisted value is retryable.  In particular, do not
+        # turn an invalid value into an implicit ASR quarantine.
+        return TRANSLATION_STATUS_MISSING
+
+    @field_validator("repair_confidence", mode="before")
+    @classmethod
+    def _normalize_repair_confidence(cls, value):
+        return normalize_repair_confidence(value)[0]
 
 
 class VocabularyItem(_StringCoerceModel):
@@ -91,6 +240,27 @@ class ReviewItem(_StringCoerceModel):
     auto_repaired: bool = False
     reason_zh: str
     risk_type: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_repair_evidence(cls, data):
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        raw_confidence = normalized.get("repair_confidence", 0.0)
+        confidence, valid = normalize_repair_confidence(raw_confidence)
+        normalized["repair_confidence"] = confidence
+        if not valid:
+            normalized["repair_reason"] = repair_reason_with_confidence_note(
+                normalized.get("repair_reason", ""),
+                raw_confidence,
+            )
+        return normalized
+
+    @field_validator("repair_confidence", mode="before")
+    @classmethod
+    def _normalize_repair_confidence(cls, value):
+        return normalize_repair_confidence(value)[0]
 
 
 class ProfileObservation(_StringCoerceModel):
@@ -150,7 +320,7 @@ class AnalysisMeta(BaseModel):
     review_items: int = 0
     review_segments: int = 0
     auto_repair_enabled: bool = True
-    auto_repair_threshold: float = 0.9
+    auto_repair_threshold: float = 0.80
     auto_repaired_lines: int = 0
     unresolved_review_items: int = 0
 

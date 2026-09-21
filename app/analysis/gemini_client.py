@@ -187,7 +187,7 @@ class LocalLLMClient:
 
     command: str = "codex"
     model: str = "codex-default"
-    timeout_seconds: float = 900.0
+    timeout_seconds: float = 360.0
     cwd: Path | None = None
     logger: RunLogger | None = None
     reasoning_effort: str = ""
@@ -236,7 +236,7 @@ class LocalLLMClient:
                 )
                 raise AppError(
                     f"Codex 本地分析超时（{self.timeout_seconds:g} 秒）。"
-                    "可通过 analysis.local_timeout_seconds 增大超时。"
+                    "请保留已完成缓存，缩小失败分块后使用 --resume 定向重试。"
                 ) from exc
             except OSError as exc:
                 raise AppError(f"无法启动 Codex CLI：{exc}") from exc

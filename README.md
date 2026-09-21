@@ -77,7 +77,7 @@ Linux/macOS 可安装 `requirements.txt` 并通过 CLI 运行，ffmpeg 和 JavaS
 
 可在 `features` 中配置 `summary`、`study_notes` 和 `character_profile`；网页默认请求完整核心结果，CLI 可按下列选项覆盖。人物档案开关参与提示词、缓存和导出，关闭时不会请求该部分内容。
 
-分析默认采用“高置信度自动修复 + 原文可回溯”：只有模型明确提供源语言修复候选且 `repair_confidence >= 0.90` 时，修复才会进入 `repaired_transcript.srt` 和播放器；原始 ASR 保留在 `transcripts/`，每条候选的原文、修复文、置信度和状态保存在 `repair_log.json` 与 `review.md`。可在 `analysis.auto_repair_enabled`、`analysis.auto_repair_threshold` 或 CLI 的 `--no-auto-repair`、`--auto-repair-threshold` 中调整。
+分析默认采用“高置信度自动修复 + 原文可回溯”：只有模型明确提供源语言修复候选且 `repair_confidence >= 0.80` 时，修复才会进入 `repaired_transcript.srt` 和播放器；原始 ASR 保留在 `transcripts/`，每条候选的原文、修复文、置信度和状态保存在 `repair_log.json` 与 `review.md`。本地 Skill 分析 worker 的默认单块超时为 360 秒；超时后应保留已完成缓存、缩小失败分块并使用 `--resume` 定向恢复。可在 `analysis.auto_repair_enabled`、`analysis.auto_repair_threshold` 或 CLI 的 `--no-auto-repair`、`--auto-repair-threshold` 中调整。
 
 完整流程结束后清理中间 WAV，源 M4A 保留至用户主动清理，以便重新生成预览。旧配置中的 `delete_source_m4a_after_preview` 不再生效。默认流程只在 `audio/` 生成播放器和双语时间轴，不编码 MP4；需要视频时使用 `--preview-mode video`。`.cmd` 启动器可直接打开悬挂字幕，不要求 Windows 预先关联 `.pyw` 文件。音频模式提供播放/暂停、进度拖动、10 秒快进/后退和键盘快捷键。
 

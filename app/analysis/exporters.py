@@ -14,7 +14,7 @@ from .schemas import (
     ReviewItem,
     VocabularyItem,
 )
-from .repairs import effective_original, write_repair_log
+from .repairs import collect_effective_review_items, effective_original, write_repair_log
 
 
 def export_analysis_json(document: AnalysisDocument, output_path: Path) -> None:
@@ -150,15 +150,7 @@ def _collect_grammar_and_expressions(
 
 
 def _collect_review_items(document: AnalysisDocument) -> list[tuple[str, ReviewItem]]:
-    items: list[tuple[str, ReviewItem]] = []
-    seen: set[tuple[object, str, str]] = set()
-    for chunk in document.chunks:
-        for item in chunk.review_items:
-            key = (item.segment_id, item.reason_zh.strip(), item.original.strip())
-            if key not in seen:
-                seen.add(key)
-                items.append((chunk.chunk_id, item))
-    return items
+    return collect_effective_review_items(document)
 
 
 def _vocabulary_lines(items: list[VocabularyItem]) -> list[str]:

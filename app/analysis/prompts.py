@@ -272,7 +272,22 @@ def _strictify_json_schema(value):
 
 def chunk_output_schema() -> dict:
     """Schema passed to local Codex for chunk and coverage responses."""
-    return _strictify_json_schema(ChunkAnalysisResult.model_json_schema())
+    schema = _strictify_json_schema(ChunkAnalysisResult.model_json_schema())
+    # ``translation_status`` is persisted by the program during cache
+    # recovery.  It is deliberately absent from the model contract so a
+    # response cannot declare a line translated/blocked and bypass retry
+    # policy.
+    for definition in schema.get("$defs", {}).values():
+        if not isinstance(definition, dict):
+            continue
+        properties = definition.get("properties")
+        if not isinstance(properties, dict) or "translation_status" not in properties:
+            continue
+        properties.pop("translation_status", None)
+        required = definition.get("required")
+        if isinstance(required, list):
+            definition["required"] = [name for name in required if name != "translation_status"]
+    return schema
 
 
 def video_summary_output_schema() -> dict:

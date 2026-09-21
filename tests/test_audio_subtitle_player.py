@@ -32,6 +32,8 @@ def test_generated_audio_player_is_standalone_and_uses_compact_overlay(tmp_path:
     assert "start_audio" in content
     assert "class AudioPlayback" in content
     assert "probe_audio_duration" in content
+    assert 'script_dir / "assets" / "ffplay.exe"' in content
+    assert 'script_dir / "assets" / "ffprobe.exe"' in content
     assert "ttk.Scale" in content
     assert 'text="暂停"' in content
     assert 'text="-10s"' in content

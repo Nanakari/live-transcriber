@@ -3,6 +3,7 @@
 import shutil
 import os
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ from .subtitles import (
     ASS_ORIGINAL_COLOR,
     ASS_OUTLINE_COLOR,
     ASS_TRANSPARENT_COLOR,
+    split_cues_by_word_timestamps,
     write_display_subtitles,
 )
 from .config import project_root, tool_path
@@ -85,6 +87,9 @@ def create_audio_preview(options: PreviewOptions) -> dict[str, Path]:
     support_dir.mkdir(exist_ok=True)
     subtitle_dir.mkdir(exist_ok=True)
     logger = RunLogger(support_dir / "run.log", debug=options.debug)
+    runtime_tools = _bundle_audio_runtime_tools(support_dir, logger)
+    word_segments = load_word_timed_segments(subtitle)
+    line_metadata = load_analysis_line_metadata(subtitle)
 
     subtitle_path = subtitle_dir / options.subtitle_name
     shutil.copy2(subtitle, subtitle_path)
@@ -93,18 +98,25 @@ def create_audio_preview(options: PreviewOptions) -> dict[str, Path]:
     original_blocks = read_srt_blocks(ja_subtitle) if ja_subtitle else []
     original_lookup = build_srt_lookup(original_blocks)
     cues = []
-    for block in read_srt_blocks(subtitle_path):
+    subtitle_blocks = read_srt_blocks(subtitle_path)
+    word_segments, metadata_for_blocks = align_display_auxiliary_data(
+        subtitle_blocks, word_segments, line_metadata, logger
+    )
+    for index, block in enumerate(subtitle_blocks):
         original = match_srt_block(block, original_lookup)
-        cues.append({
+        cue = {
             "start": block["start"],
             "end": block["end"],
             "original": original["text"] if original else "",
             "translation": block["text"],
-        })
+        }
+        cue.update(display_status_metadata(metadata_for_blocks[index] if metadata_for_blocks else {}))
+        cues.append(cue)
 
+    display_cues = split_display_cues(cues, word_segments, logger)
     audio_mode_subtitle = output_dir / AUDIO_MODE_SUBTITLE_FILENAME
     audio_mode_ass = support_dir / "audio_mode.bilingual.ass"
-    write_display_subtitles(cues, audio_mode_subtitle, audio_mode_ass)
+    write_display_subtitles(display_cues, audio_mode_subtitle, audio_mode_ass)
     audio_player_path = output_dir / AUDIO_PLAYER_FILENAME
     write_audio_subtitle_player(audio_player_path, audio, audio_mode_subtitle)
     audio_player_launcher_path = output_dir / AUDIO_PLAYER_LAUNCHER_FILENAME
@@ -116,6 +128,7 @@ def create_audio_preview(options: PreviewOptions) -> dict[str, Path]:
         audio_player_path.name,
         audio_mode_subtitle.name,
         audio_player_launcher_path.name,
+        runtime_tools=runtime_tools,
     )
     manifest_path = support_dir / "manifest.json"
     manifest_path.write_text(json.dumps({
@@ -126,6 +139,11 @@ def create_audio_preview(options: PreviewOptions) -> dict[str, Path]:
         "audio_player": str(audio_player_path.resolve()),
         "audio_launcher": str(audio_player_launcher_path.resolve()),
         "audio_subtitle": str(audio_mode_subtitle.resolve()),
+        "runtime_tools": {
+            name: f"assets/{path.name}" for name, path in runtime_tools.items()
+        },
+        "display_cues_before_split": len(cues),
+        "display_cues_after_split": len(display_cues),
         "audio_controls": ["play_pause", "timeline_seek", "seek_minus_10", "seek_plus_10", "keyboard_seek"],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     if group:
@@ -182,6 +200,8 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
     support_dir.mkdir(exist_ok=True)
     subtitle_dir.mkdir(exist_ok=True)
     logger = RunLogger(support_dir / "run.log", debug=options.debug)
+    word_segments = load_word_timed_segments(subtitle)
+    line_metadata = load_analysis_line_metadata(subtitle)
 
     video_path = output_dir / options.video_name
     subtitle_path = subtitle_dir / options.subtitle_name
@@ -198,12 +218,22 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
     display_srt = subtitle_dir / "display.bilingual.srt"
     burn_subtitle = subtitle_dir / "display.bilingual.ass"
     cues = []
-    for block in read_srt_blocks(subtitle_path):
+    subtitle_blocks = read_srt_blocks(subtitle_path)
+    word_segments, metadata_for_blocks = align_display_auxiliary_data(
+        subtitle_blocks, word_segments, line_metadata, logger
+    )
+    for index, block in enumerate(subtitle_blocks):
         original = match_srt_block(block, original_lookup)
-        cues.append({"start": block["start"], "end": block["end"],
-                     "original": original["text"] if original else "",
-                     "translation": block["text"]})
-    write_display_subtitles(cues, display_srt, burn_subtitle)
+        cue = {
+            "start": block["start"],
+            "end": block["end"],
+            "original": original["text"] if original else "",
+            "translation": block["text"],
+        }
+        cue.update(display_status_metadata(metadata_for_blocks[index] if metadata_for_blocks else {}))
+        cues.append(cue)
+    display_cues = split_display_cues(cues, word_segments, logger)
+    write_display_subtitles(display_cues, display_srt, burn_subtitle)
     floating_overlay_path = output_dir / options.floating_overlay_name
     write_floating_subtitle_overlay(floating_overlay_path, display_srt)
     floating_overlay_launcher_path = output_dir / OVERLAY_LAUNCHER_FILENAME
@@ -211,6 +241,9 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
     group = group_dir_from_artifact_path(subtitle) or group_dir_from_artifact_path(audio)
     audio_output_dir = (group / "audio") if group else (output_dir / "audio")
     audio_output_dir.mkdir(parents=True, exist_ok=True)
+    audio_support_dir = audio_output_dir / "assets"
+    audio_support_dir.mkdir(parents=True, exist_ok=True)
+    runtime_tools = _bundle_audio_runtime_tools(audio_support_dir, logger)
     audio_mode_subtitle = audio_output_dir / AUDIO_MODE_SUBTITLE_FILENAME
     shutil.copy2(display_srt, audio_mode_subtitle)
     audio_player_path = audio_output_dir / AUDIO_PLAYER_FILENAME
@@ -224,6 +257,7 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
         audio_player_path.name,
         audio_mode_subtitle.name,
         audio_player_launcher_path.name,
+        runtime_tools=runtime_tools,
     )
     build_preview_video(
         audio=audio,
@@ -253,6 +287,11 @@ def create_video_preview(options: PreviewOptions) -> dict[str, Path]:
         "audio_player": str(audio_player_path.resolve()),
         "audio_launcher": str(audio_player_launcher_path.resolve()),
         "audio_subtitle": str(audio_mode_subtitle.resolve()),
+        "audio_runtime_tools": {
+            name: f"audio/assets/{path.name}" for name, path in runtime_tools.items()
+        },
+        "display_cues_before_split": len(cues),
+        "display_cues_after_split": len(display_cues),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     if group:
         write_media_index(group)
@@ -280,6 +319,199 @@ def ensure_ffmpeg_for_preview() -> None:
     bundled = tool_path("ffmpeg")
     if bundled:
         os.environ["PATH"] = str(bundled.parent.resolve()) + os.pathsep + os.environ.get("PATH", "")
+
+
+def _find_runtime_tool(name: str) -> Path | None:
+    bundled = tool_path(name)
+    if bundled:
+        return bundled
+    discovered = shutil.which(name)
+    return Path(discovered) if discovered else None
+
+
+def _bundle_audio_runtime_tools(support_dir: Path, logger: RunLogger) -> dict[str, Path]:
+    """Copy ffplay/ffprobe beside generated players when available.
+
+    The generated player still retains PATH and explicit-override fallbacks,
+    but a preview package created on this machine no longer needs those tools
+    to be installed globally on the machine where it is played.
+    """
+    support_dir.mkdir(parents=True, exist_ok=True)
+    bundled: dict[str, Path] = {}
+    for name in ("ffplay", "ffprobe"):
+        source = _find_runtime_tool(name)
+        if source is None or not source.exists() or not source.is_file():
+            logger.write(f"warning: 未找到 {name}.exe，播放器将保留 PATH 回退。")
+            continue
+        target_name = f"{name}.exe" if os.name == "nt" else name
+        target = support_dir / target_name
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+        bundled[name] = target
+        logger.write(f"已内置播放器运行时：{target.name}")
+    return bundled
+
+
+def split_display_cues(
+    cues: list[dict],
+    word_segments: list[list[dict]],
+    logger: RunLogger,
+) -> list[dict]:
+    if word_segments and not word_segments_match_cues(cues, word_segments):
+        logger.write("词级时间戳与字幕时间或原文不可验证，关闭词级拆分。")
+        word_segments = []
+    display_cues = split_cues_by_word_timestamps(cues, word_segments, max_duration=9.0)
+    if len(display_cues) != len(cues):
+        durations = []
+        for cue in display_cues:
+            try:
+                durations.append(float(cue["end"]) - float(cue["start"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        logger.write(
+            f"按词级时间戳拆分长字幕：{len(cues)} 段 -> {len(display_cues)} 段，"
+            f"最大时长={max(durations, default=0.0):.2f}s"
+        )
+    elif word_segments:
+        logger.write(f"词级时间戳已加载：{len(word_segments)} 段，未发现需要拆分的长字幕。")
+    else:
+        logger.write("未找到可用词级时间戳，保留原始显示字幕时间轴。")
+    return display_cues
+
+
+def word_segments_match_cues(cues: list[dict], word_segments: list[list[dict]]) -> bool:
+    if len(cues) != len(word_segments):
+        return False
+    for cue, words in zip(cues, word_segments):
+        if not isinstance(words, list):
+            return False
+        try:
+            cue_start = float(cue["start"])
+            cue_end = float(cue["end"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not math.isfinite(cue_start) or not math.isfinite(cue_end) or cue_end <= cue_start:
+            return False
+        if not words:
+            continue
+        has_overlap = False
+        has_text = False
+        for word in words:
+            if not isinstance(word, dict):
+                return False
+            try:
+                word_start = float(word["start"])
+                word_end = float(word["end"])
+            except (KeyError, TypeError, ValueError):
+                return False
+            if not math.isfinite(word_start) or not math.isfinite(word_end) or word_end < word_start:
+                return False
+            if word_end >= cue_start and word_start <= cue_end:
+                has_overlap = True
+            if str(word.get("word", word.get("text", "")) or "").strip():
+                has_text = True
+        if not has_overlap or (str(cue.get("original") or "").strip() and not has_text):
+            return False
+    return True
+
+
+def _normalise_srt_text(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _exported_translation_text(line: dict) -> str | None:
+    """Mirror ``export_translation_srt`` for metadata/SRT validation.
+
+    Empty translations are intentionally exported as the original text plus
+    ``[需要复查]``.  Treating the empty JSON value as an empty SRT line would
+    reject otherwise valid blocked rows and disable all display metadata.
+    """
+    if "translation_zh" not in line:
+        return None
+    translation = str(line.get("translation_zh") or "")
+    if translation.strip():
+        return translation
+    return f"{line.get('original', '')} [需要复查]"
+
+
+def align_display_auxiliary_data(
+    subtitle_blocks: list[dict],
+    word_segments: list[list[dict]],
+    line_metadata: list[dict],
+    logger: RunLogger,
+) -> tuple[list[list[dict]], list[dict]]:
+    """Align timing/status data to parsed SRT blocks or disable enhancement.
+
+    Analysis JSON is ordered by exported line order, while an externally
+    supplied SRT can be shortened or reordered.  Indexing the two lists in
+    that case silently assigns one line's timing or status to another.  Match
+    by time and exported translation text; any ambiguity disables both
+    enhancements for this preview.
+    """
+    if not subtitle_blocks:
+        return [], []
+    if len(line_metadata) != len(subtitle_blocks):
+        logger.write("字幕块数量与分析行不一致，关闭词级拆分和状态增强。")
+        return [], []
+    if len(word_segments) not in {0, len(line_metadata)}:
+        logger.write("词级时间戳数量与分析行不一致，关闭词级拆分。")
+        word_segments = []
+
+    seen_ids: set[int] = set()
+    for line in line_metadata:
+        segment_id = _as_segment_id(line.get("segment_id"))
+        if segment_id is None or segment_id in seen_ids:
+            logger.write("分析行 segment_id 缺失或重复，关闭词级拆分和状态增强。")
+            return [], []
+        seen_ids.add(segment_id)
+
+    matches: list[int] = []
+    for block in subtitle_blocks:
+        try:
+            block_start = float(block["start"])
+            block_end = float(block["end"])
+        except (KeyError, TypeError, ValueError):
+            logger.write("字幕块时间戳不可验证，关闭词级拆分和状态增强。")
+            return [], []
+        if (
+            not math.isfinite(block_start)
+            or not math.isfinite(block_end)
+            or block_end <= block_start
+        ):
+            logger.write("字幕块时间戳无效，关闭词级拆分和状态增强。")
+            return [], []
+        candidates: list[int] = []
+        for index, line in enumerate(line_metadata):
+            try:
+                line_start = float(line["start"])
+                line_end = float(line["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                not math.isfinite(line_start)
+                or not math.isfinite(line_end)
+                or line_end <= line_start
+            ):
+                continue
+            if abs(line_start - block_start) > 0.02 or abs(line_end - block_end) > 0.02:
+                continue
+            exported_text = _exported_translation_text(line)
+            if exported_text is None:
+                continue
+            if _normalise_srt_text(exported_text) != _normalise_srt_text(block.get("text", "")):
+                continue
+            candidates.append(index)
+        if len(candidates) != 1:
+            logger.write("字幕块无法与唯一分析行按时间和译文对应，关闭词级拆分和状态增强。")
+            return [], []
+        matches.append(candidates[0])
+
+    if len(set(matches)) != len(matches):
+        logger.write("字幕块映射到重复分析行，关闭词级拆分和状态增强。")
+        return [], []
+    aligned_metadata = [line_metadata[index] for index in matches]
+    aligned_words = [word_segments[index] for index in matches] if word_segments else []
+    return aligned_words, aligned_metadata
 
 
 def parse_resolution(value: str) -> tuple[int, int]:
@@ -475,20 +707,52 @@ def maybe_copy_original_subtitle(chinese_subtitle: Path, output_dir: Path) -> Pa
             shutil.copy2(repaired, target)
             return target
 
-    transcript_dirs: list[Path] = []
+    related = _read_related_analysis(chinese_subtitle)
+    if related is None:
+        # A directory-wide glob cannot establish which transcript belongs to a
+        # standalone subtitle, so leave the original-language track absent.
+        return None
+    analysis_json, analysis = related
+    if not isinstance(analysis, dict):
+        return None
+    meta = analysis.get("meta", {})
+    if not isinstance(meta, dict):
+        return None
+
     group_dir = group_dir_from_artifact_path(chinese_subtitle)
+    run_id = str(meta.get("transcript_run_id") or "").strip()
+    input_file_text = str(meta.get("input_file") or "").strip()
+    input_file = Path(input_file_text) if input_file_text else None
+    candidates: list[Path] = []
+    if input_file is not None:
+        if not input_file.is_absolute():
+            input_file = (analysis_json.parent / input_file).resolve()
+        candidates.append(input_file.with_suffix(".srt"))
+
+    names: list[str] = []
+    if run_id:
+        names.append(f"{run_id}_transcript.srt")
+    if input_file is not None and input_file.name:
+        names.append(input_file.with_suffix(".srt").name)
+    transcript_dirs: list[Path] = []
     if group_dir:
         transcript_dirs.append(group_dir / "transcripts")
     transcript_dirs.append(project_root() / "outputs" / "transcripts")
-    run_id = infer_transcript_run_id_from_analysis(chinese_subtitle)
-    candidates: list[Path] = []
     for transcripts_dir in transcript_dirs:
-        if not transcripts_dir.exists():
+        for name in names:
+            candidates.append(transcripts_dir / name)
+
+    existing: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
             continue
-        if run_id:
-            candidates.append(transcripts_dir / f"{run_id}_transcript.srt")
-        candidates.extend(transcripts_dir.glob("*_transcript.srt"))
-    existing = [path for path in candidates if path.exists() and path.is_file()]
+        if resolved in seen or not resolved.exists() or not resolved.is_file():
+            continue
+        seen.add(resolved)
+        existing.append(resolved)
     if not existing:
         return None
     source = existing[0]
@@ -526,6 +790,128 @@ def infer_transcript_run_id_from_analysis(chinese_subtitle: Path) -> str:
         return str(meta.get("transcript_run_id") or "").strip()
     except Exception:
         return ""
+
+
+def _read_related_analysis(chinese_subtitle: Path) -> tuple[Path, dict] | None:
+    analysis_json = find_related_analysis_json(chinese_subtitle)
+    if not analysis_json:
+        return None
+    try:
+        return analysis_json, json.loads(analysis_json.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _analysis_lines_in_export_order(analysis: dict) -> list[dict]:
+    """Flatten analysis lines in the same order used by translation_zh.srt."""
+    lines: list[dict] = []
+    chunks = analysis.get("chunks", []) if isinstance(analysis, dict) else []
+    if not isinstance(chunks, list):
+        return lines
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        chunk_lines = chunk.get("bilingual_lines", [])
+        if not isinstance(chunk_lines, list):
+            continue
+        lines.extend(line for line in chunk_lines if isinstance(line, dict))
+    return lines
+
+
+def display_status_metadata(line: dict) -> dict:
+    """Copy program-owned review fields onto a display cue when available."""
+    if not isinstance(line, dict):
+        return {}
+    fields = (
+        "translation_status",
+        "brief_note",
+        "review_required",
+        "review_reason",
+        "asr_suspect",
+        "asr_issue",
+    )
+    return {field: line[field] for field in fields if field in line}
+
+
+def load_analysis_line_metadata(chinese_subtitle: Path) -> list[dict]:
+    """Return display metadata in exported subtitle order."""
+    related = _read_related_analysis(chinese_subtitle)
+    if related is None:
+        return []
+    _, analysis = related
+    return _analysis_lines_in_export_order(analysis)
+
+
+def _as_segment_id(value) -> int | None:
+    try:
+        # bool is an int subclass but is not a valid transcript identifier.
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, float) and not value.is_integer():
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def load_word_timed_segments(chinese_subtitle: Path) -> list[list[dict]]:
+    """Load word timestamps by exported analysis ``segment_id`` order.
+
+    The raw transcript may be reordered by a repair or resume path.  Returning
+    words by list position would then attach one segment's timing to another's
+    subtitle text, so a complete segment-id mapping is required before any
+    display splitting is attempted.
+    """
+    related = _read_related_analysis(chinese_subtitle)
+    if related is None:
+        return []
+    analysis_json, analysis = related
+    if not isinstance(analysis, dict):
+        return []
+    lines = _analysis_lines_in_export_order(analysis)
+    if not lines:
+        return []
+    try:
+        meta = analysis.get("meta", {})
+        if not isinstance(meta, dict):
+            return []
+        input_file = Path(str(meta.get("input_file") or ""))
+        if not input_file.is_absolute():
+            input_file = (analysis_json.parent / input_file).resolve()
+        if not input_file.exists() or not input_file.is_file():
+            return []
+        transcript = json.loads(input_file.read_text(encoding="utf-8"))
+        segments = transcript.get("segments", [])
+        if not isinstance(segments, list):
+            return []
+        by_id: dict[int, dict] = {}
+        for segment in segments:
+            if not isinstance(segment, dict):
+                return []
+            raw_id = segment.get("id")
+            if raw_id is None:
+                raw_id = segment.get("segment_id")
+            segment_id = _as_segment_id(raw_id)
+            if segment_id is None or segment_id in by_id:
+                return []
+            by_id[segment_id] = segment
+
+        ordered: list[list[dict]] = []
+        seen_line_ids: set[int] = set()
+        for line in lines:
+            segment_id = _as_segment_id(line.get("segment_id"))
+            if segment_id is None or segment_id in seen_line_ids or segment_id not in by_id:
+                # Partial mappings are unsafe: returning no timing data keeps
+                # every subtitle cue intact rather than guessing positions.
+                return []
+            seen_line_ids.add(segment_id)
+            words = by_id[segment_id].get("words") or []
+            if not isinstance(words, list):
+                return []
+            ordered.append([word for word in words if isinstance(word, dict)])
+        return ordered
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return []
 
 
 def maybe_write_bilingual_subtitle(chinese_subtitle: Path, japanese_subtitle: Path | None, output_dir: Path) -> Path | None:
@@ -710,9 +1096,15 @@ def read_srt_blocks(path: Path) -> list[dict[str, str]]:
     blocks: list[dict[str, str]] = []
     for raw in raw_blocks:
         lines = [line.strip("\ufeff") for line in raw.splitlines() if line.strip()]
-        time_line = next((line for line in lines if "-->" in line), "")
-        text_lines = [line for line in lines if "-->" not in line and not line.isdigit()]
-        if not time_line or not text_lines:
+        time_index = next((index for index, line in enumerate(lines) if "-->" in line), -1)
+        if time_index < 0:
+            continue
+        time_line = lines[time_index]
+        # Only the line before the time range is the SRT sequence number.
+        # Numeric subtitle text after the time range is valid content and must
+        # not be discarded (for example: "1", "2", "3").
+        text_lines = lines[time_index + 1:]
+        if not text_lines:
             continue
         start_text, _, end_text = time_line.partition("-->")
         try:
@@ -819,7 +1211,14 @@ def write_audio_readme(
     player_name: str,
     subtitle_name: str,
     launcher_name: str | None = None,
+    runtime_tools: dict[str, Path] | None = None,
 ) -> None:
+    bundled_runtime = ""
+    if runtime_tools:
+        names = ", ".join(path.name for path in runtime_tools.values())
+        bundled_runtime = f"\n- assets/：播放器已随包内置 {names}，不依赖目标机器的 FFmpeg PATH。"
+    else:
+        bundled_runtime = "\n- assets/：如果包内没有 ffplay/ffprobe，播放器会回退到系统 PATH 或 --ffplay 指定路径。"
     path.write_text(
         f"""音频 + 悬挂字幕使用说明
 
@@ -831,6 +1230,7 @@ def write_audio_readme(
 - {subtitle_name}：音频模式双语时间轴。
 - {launcher_name or player_name}：Windows 直接启动入口，不要求系统关联 .pyw 文件。
 - {player_name}：独立 Python 图形窗口播放器。
+{bundled_runtime}
 
 播放器控制：
 - 播放/暂停按钮：暂停或继续音频。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -226,3 +227,31 @@ def test_local_client_uses_explicit_isolation_reasoning_and_output_schema(
     assert "--output-schema" in command
     assert command[command.index("-c") + 1] == 'model_reasoning_effort="medium"'
     assert "GEMINI_API_KEY" not in kwargs["env"]  # type: ignore[operator]
+
+
+def test_local_client_default_timeout_is_360_seconds() -> None:
+    assert LocalLLMClient().timeout_seconds == 360.0
+
+
+def test_local_client_timeout_passes_bounded_timeout_and_recommends_resume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(kwargs)
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(gemini_client.subprocess, "run", fake_run)
+    logger = FakeLogger()
+    client = LocalLLMClient(
+        command=sys.executable,
+        cwd=tmp_path,
+        logger=logger,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AppError, match="缩小失败分块.*--resume"):
+        client.generate_json_text("task", system_prompt="policy")
+
+    assert calls[0]["timeout"] == 360.0
+    assert any("timeout seconds=360" in message for message in logger.messages)

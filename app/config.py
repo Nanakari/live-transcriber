@@ -63,7 +63,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "api_key_env": "GEMINI_API_KEY",
         "local_command": "codex",
         "local_model": "",
-        "local_timeout_seconds": 900,
+        "local_timeout_seconds": 360,
         "local_reasoning_effort": "medium",
         "local_ignore_user_config": True,
         "local_concurrency": 4,
@@ -79,6 +79,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "request_timeout_seconds": 300,
         "request_interval_seconds": 6,
         "cache_enabled": True,
+        "auto_repair_enabled": True,
+        "auto_repair_threshold": 0.80,
         "output_formats": ["json", "markdown", "srt"],
     },
 }

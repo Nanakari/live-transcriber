@@ -80,16 +80,20 @@ def write_overlay_launcher(target: Path, script_name: str, *, subtitle: Path | N
         target.write_text(content, encoding="utf-8", newline="\r\n")
         return target
     project_pythonw = Path(__file__).resolve().parents[1] / ".venv" / "Scripts" / "pythonw.exe"
+    pythonw_prefix = "%~dp0"
     try:
         pythonw_reference = os.path.relpath(project_pythonw, target.parent.resolve()).replace("/", "\\")
     except ValueError:
         # Test/output folders can be on another Windows drive; use an absolute
-        # project interpreter path in that case and keep the PATH fallback.
+        # project interpreter path in that case.  Absolute Windows paths must
+        # not be prefixed with %~dp0, which would turn D:\\... into
+        # %~dp0D:\\... and make the interpreter path invalid.
         pythonw_reference = str(project_pythonw)
+        pythonw_prefix = ""
     content = f"""@echo off
 setlocal
 set "SCRIPT=%~dp0{script_name}"
-set "PYTHONW=%~dp0{pythonw_reference}"
+set "PYTHONW={pythonw_prefix}{pythonw_reference}"
 if not exist "%PYTHONW%" set "PYTHONW=pythonw.exe"
 if not exist "%SCRIPT%" exit /b 2
 start "" "%PYTHONW%" "%SCRIPT%" %*

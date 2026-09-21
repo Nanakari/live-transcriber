@@ -146,7 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--limit-chunks", type=int, default=None, help="只处理前 N 个 chunk")
     analyze.add_argument("--local-concurrency", type=int, default=None, help="Skill 内部本地分析并发数，默认 4")
     analyze.add_argument("--auto-repair", action=argparse.BooleanOptionalAction, default=None, help="启用高置信度源语言自动修复；原始 ASR 保留")
-    analyze.add_argument("--auto-repair-threshold", type=float, default=None, help="自动修复最低置信度，默认 0.90")
+    analyze.add_argument("--auto-repair-threshold", type=float, default=None, help="自动修复最低置信度，默认 0.80")
     analyze.add_argument("--dry-run", action="store_true", help="只展示 chunk 切分结果，不调用 API")
     analyze.add_argument("--resume", action="store_true", help="跳过已成功处理的 chunk")
     analyze.add_argument("--debug", action="store_true", help="输出 traceback 和详细日志")
@@ -191,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--limit-chunks", type=int, default=None, help="只处理前 N 个 chunk")
     pipeline.add_argument("--local-concurrency", type=int, default=None, help="Skill 内部本地分析并发数，默认 4")
     pipeline.add_argument("--auto-repair", action=argparse.BooleanOptionalAction, default=None, help="启用高置信度源语言自动修复；原始 ASR 保留")
-    pipeline.add_argument("--auto-repair-threshold", type=float, default=None, help="自动修复最低置信度，默认 0.90")
+    pipeline.add_argument("--auto-repair-threshold", type=float, default=None, help="自动修复最低置信度，默认 0.80")
     pipeline.add_argument("--resume", action="store_true", help="跳过已成功处理的 chunk")
     pipeline.add_argument("--resolution", default="1280x720", help="预览视频分辨率")
     pipeline.add_argument("--preview-mode", default="audio", choices=["audio", "video", "potplayer"], help="预览模式，默认 audio；video/potplayer 为可选视频模式")
@@ -526,7 +526,7 @@ def analyze_task(args: argparse.Namespace) -> dict[str, Any]:
         resume=args.resume,
         debug=args.debug,
         local_command=analysis_config.get("local_command", "codex"),
-        local_timeout_seconds=float(analysis_config.get("local_timeout_seconds", 900)),
+        local_timeout_seconds=float(analysis_config.get("local_timeout_seconds", 360)),
         local_reasoning_effort=str(analysis_config.get("local_reasoning_effort", "medium") or "").strip(),
         local_ignore_user_config=bool(analysis_config.get("local_ignore_user_config", True)),
         local_concurrency=max(1, int(
@@ -542,7 +542,7 @@ def analyze_task(args: argparse.Namespace) -> dict[str, Any]:
         auto_repair_threshold=float(
             getattr(args, "auto_repair_threshold", None)
             if getattr(args, "auto_repair_threshold", None) is not None
-            else analysis_config.get("auto_repair_threshold", 0.90)
+            else analysis_config.get("auto_repair_threshold", 0.80)
         ),
     )
     result = run_analysis(options)

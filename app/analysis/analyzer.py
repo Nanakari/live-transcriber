@@ -33,7 +33,11 @@ from .prompts import (
     build_repair_prompt,
     chunk_output_schema,
 )
-from .repairs import apply_high_confidence_repairs
+from .repairs import (
+    apply_high_confidence_repairs,
+    collect_effective_review_items,
+    select_repair_candidate,
+)
 from .schemas import (
     AnalysisChunk,
     AnalysisDocument,
@@ -41,6 +45,13 @@ from .schemas import (
     BilingualLine,
     ChunkAnalysisResult,
     FailedChunk,
+    TRANSLATION_STATUS_BLOCKED_ASR_REVIEW,
+    TRANSLATION_STATUS_MISSING,
+    TRANSLATION_STATUS_TRANSLATED,
+    ReviewItem,
+    is_missing_translation_payload,
+    normalize_repair_confidence,
+    repair_reason_with_confidence_note,
 )
 
 
@@ -75,11 +86,11 @@ class AnalyzeOptions:
     summary: bool = True
     study_notes: bool = True
     local_command: str = "codex"
-    local_timeout_seconds: float = 900.0
+    local_timeout_seconds: float = 360.0
     local_reasoning_effort: str = ""
     local_ignore_user_config: bool = True
     auto_repair_enabled: bool = True
-    auto_repair_threshold: float = 0.90
+    auto_repair_threshold: float = 0.80
     # Four workers is the default balance for local Codex requests: enough to
     # keep the pipeline busy without turning transient rate limits into a
     # wave of simultaneous failures.  The CLI/config can override it.
@@ -140,7 +151,7 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
     results: list[ChunkAnalysisResult | None] = [None] * len(chunks)
     failed_by_index: dict[int, FailedChunk] = {}
     skipped = 0
-    pending: list[tuple[int, AnalysisChunk, Path, Path]] = []
+    pending: list[tuple[int, AnalysisChunk, Path, Path, ChunkAnalysisResult | None]] = []
 
     for index, chunk in enumerate(chunks, start=1):
         key = cache_key(
@@ -158,31 +169,82 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
         )
         result_path = chunk_result_path(chunks_dir, chunk, key)
         shared_result_path = chunk_result_path(shared_cache_dir, chunk, key)
+        cached_for_recovery: ChunkAnalysisResult | None = None
         if options.resume and options.cache_enabled:
             cached = load_cached_result(shared_result_path) or load_cached_result(result_path)
             if cached:
-                coverage_issues = _chunk_coverage_issues(cached, chunk)
-                if coverage_issues:
+                raw_cache_issues = _chunk_coverage_issues(cached, chunk)
+                misaligned_ids = _misaligned_cache_segment_ids(cached, chunk)
+                if raw_cache_issues:
                     logger.write(
-                        f"ignore incomplete cache {chunk.chunk_id}: "
-                        + "; ".join(coverage_issues)
+                        f"validate cache before canonicalize {chunk.chunk_id}: "
+                        + "; ".join(raw_cache_issues)
                     )
-                else:
+                if misaligned_ids:
+                    # A cached translation must not be associated with a
+                    # different source/timeline row merely because canonical
+                    # normalization can rewrite those fields.  Remove only
+                    # the affected rows and let coverage recovery request
+                    # those segment IDs.
+                    cached = _drop_misaligned_cache_rows(cached, misaligned_ids)
+                cached = _canonicalize_result(cached, chunk)
+                coverage_issues = _chunk_coverage_issues(cached, chunk)
+                retryable_missing = _missing_segments(cached, chunk)
+                blocked = _blocked_segments(cached, chunk)
+                if retryable_missing and not _cache_result_is_reusable(cached):
+                    # An all-fallback cache can come from a failed full
+                    # request and has no successful rows to preserve.  Run a
+                    # normal full request so summary/study fields are not
+                    # permanently stranded in an empty recovery shell.
+                    logger.write(
+                        f"reprocess cache with no reusable rows {chunk.chunk_id}: "
+                        f"retryable_missing={len(retryable_missing)}"
+                    )
+                elif retryable_missing:
+                    cached_for_recovery = cached
+                    details = [
+                        f"retryable_missing={len(retryable_missing)}",
+                        f"blocked_asr_review={len(blocked)}",
+                    ]
+                    if coverage_issues:
+                        details.append("structural=" + "; ".join(coverage_issues))
+                    logger.write(
+                        f"recover partial cache {chunk.chunk_id}: " + " ".join(details)
+                    )
+                elif blocked:
                     skipped += 1
-                    cached = _canonicalize_result(cached, chunk)
+                    save_chunk_result(result_path, cached)
+                    results[index - 1] = cached
+                    logger.write(
+                        f"skip cache with blocked ASR review {chunk.chunk_id} "
+                        f"blocked={len(blocked)} ({index}/{len(chunks)})"
+                    )
+                    continue
+                elif not coverage_issues:
+                    skipped += 1
                     save_chunk_result(result_path, cached)
                     results[index - 1] = cached
                     logger.write(f"skip validated cache {chunk.chunk_id} ({index}/{len(chunks)})")
                     continue
+                else:
+                    # Canonicalization normally repairs alignment and removes
+                    # unknown/duplicate rows.  If a cache is still malformed,
+                    # keep whatever valid rows survived and let coverage
+                    # recovery request only the missing segment IDs.
+                    cached_for_recovery = cached
+                    logger.write(
+                        f"recover malformed cache {chunk.chunk_id}: "
+                        + "; ".join(coverage_issues)
+                    )
 
         logger.write(f"process {chunk.chunk_id} ({index}/{len(chunks)})")
 
-        pending.append((index, chunk, result_path, shared_result_path))
+        pending.append((index, chunk, result_path, shared_result_path, cached_for_recovery))
 
     def process_pending(
-        item: tuple[int, AnalysisChunk, Path, Path],
+        item: tuple[int, AnalysisChunk, Path, Path, ChunkAnalysisResult | None],
     ) -> tuple[int, ChunkAnalysisResult, FailedChunk | None]:
-        index, chunk, result_path, shared_result_path = item
+        index, chunk, result_path, shared_result_path, cached_for_recovery = item
         try:
             result = _process_chunk(
                 client,
@@ -191,9 +253,14 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
                 source_language,
                 logger,
                 media_context=media_context,
+                initial_result=cached_for_recovery,
             )
             save_chunk_result(result_path, result)
-            if options.cache_enabled and not _result_has_fallback(result):
+            if options.cache_enabled and _cache_result_is_reusable(result):
+                # Partial caches are resumable: translated rows are retained,
+                # retryable omissions are requested on the next run, and
+                # blocked ASR rows keep their explicit state instead of being
+                # sent to the model again.
                 save_chunk_result(shared_result_path, result)
             return index, result, None
         except Exception as exc:
@@ -205,9 +272,26 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
                 raw_response_file=str(failed_path),
             )
             logger.write(f"failed {chunk.chunk_id}: {exc}")
-            fallback_result = _fallback_chunk_result(chunk)
+            if cached_for_recovery is not None:
+                # A coverage-only recovery failure must retain every good row
+                # already present in the cache.  Fill only the retryable IDs;
+                # never replace a partially recovered chunk with a full
+                # fallback result.
+                retained = _canonicalize_result(cached_for_recovery, chunk)
+                missing = _missing_segments(retained, chunk)
+                fallback_result = _add_fallback_lines(retained, missing, chunk)
+                logger.write(
+                    f"coverage recovery fallback {chunk.chunk_id}: "
+                    f"retained={len(retained.bilingual_lines) - len(missing)} "
+                    f"fallback={len(missing)}"
+                )
+            else:
+                fallback_result = _fallback_chunk_result(chunk)
             save_chunk_result(result_path, fallback_result)
-            logger.write(f"fallback {chunk.chunk_id}: preserved {len(chunk.segments)} source segments")
+            if options.cache_enabled and _cache_result_is_reusable(fallback_result):
+                save_chunk_result(shared_result_path, fallback_result)
+            if cached_for_recovery is None:
+                logger.write(f"fallback {chunk.chunk_id}: preserved {len(chunk.segments)} source segments")
             return index, fallback_result, failed_chunk
 
     if pending:
@@ -244,7 +328,7 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
     ordered_results = _ensure_global_coverage(chunks, ordered_results, logger)
     fallback_lines = sum(
         1 for result in ordered_results for line in result.bilingual_lines
-        if line.brief_note == FALLBACK_TRANSLATION_NOTE
+        if _line_has_fallback(line)
     )
     fallback_chunks = sum(1 for result in ordered_results if _result_has_fallback(result))
 
@@ -373,18 +457,26 @@ def _process_chunk(
     logger: RunLogger,
     *,
     media_context: str = "",
+    initial_result: ChunkAnalysisResult | None = None,
 ) -> ChunkAnalysisResult:
-    prompt = build_chunk_prompt(
-        chunk,
-        profile=options.profile,
-        source_language=source_language,
-        target_language=options.target_language,
-        character_profile=options.character_profile,
-        summary=options.summary,
-        study_notes=options.study_notes,
-        media_context=media_context,
-    )
-    result = _request_valid_chunk_result(client, prompt, chunk, logger, options)
+    if initial_result is None:
+        prompt = build_chunk_prompt(
+            chunk,
+            profile=options.profile,
+            source_language=source_language,
+            target_language=options.target_language,
+            character_profile=options.character_profile,
+            summary=options.summary,
+            study_notes=options.study_notes,
+            media_context=media_context,
+        )
+        result = _request_valid_chunk_result(client, prompt, chunk, logger, options)
+    else:
+        result = _canonicalize_result(initial_result, chunk)
+        logger.write(
+            f"coverage recovery only {chunk.chunk_id}: "
+            f"retained={len(result.bilingual_lines) - len(_missing_segments(result, chunk))}"
+        )
     return _complete_chunk_coverage(
         client,
         result,
@@ -480,6 +572,24 @@ def _parse_chunk_result(
         if not options.study_notes:
             for key in ("vocabulary", "grammar", "fixed_expressions", "tone_notes", "learning_value"):
                 parsed.pop(key, None)
+    # translation_status and auto_repaired are program-owned fields.  A model
+    # response may contain them because it was copied from a prior cache, but
+    # it must not decide whether a line is retryable or already accepted.
+    for line in parsed.get("bilingual_lines", []) or []:
+        if isinstance(line, dict):
+            line.pop("translation_status", None)
+            line["translation_status"] = (
+                TRANSLATION_STATUS_MISSING
+                if is_missing_translation_payload(
+                    line.get("translation_zh"),
+                    line.get("brief_note"),
+                )
+                else TRANSLATION_STATUS_TRANSLATED
+            )
+            line["auto_repaired"] = False
+    for item in parsed.get("review_items", []) or []:
+        if isinstance(item, dict):
+            item["auto_repaired"] = False
     parsed.setdefault("chunk_id", chunk.chunk_id)
     parsed.setdefault("start", chunk.start)
     parsed.setdefault("end", chunk.end)
@@ -547,11 +657,16 @@ def _complete_chunk_coverage(
 
 def _canonicalize_result(result: ChunkAnalysisResult, chunk: AnalysisChunk) -> ChunkAnalysisResult:
     expected = {segment.segment_id: segment for segment in chunk.segments}
-    review_items = []
-    reviews_by_segment: dict[int, list] = {}
+    review_items: list[ReviewItem] = []
+    reviews_by_segment: dict[int, list[ReviewItem]] = {}
+    seen_review_keys: set[tuple] = set()
     for item in result.review_items:
         if item.segment_id is None:
-            review_items.append(item)
+            normalized = item.model_copy(update={"auto_repaired": False})
+            key = _review_dedup_key(normalized)
+            if key not in seen_review_keys:
+                seen_review_keys.add(key)
+                review_items.append(normalized)
             continue
         segment = expected.get(item.segment_id)
         if segment is None:
@@ -561,54 +676,117 @@ def _canonicalize_result(result: ChunkAnalysisResult, chunk: AnalysisChunk) -> C
                 "start": segment.start,
                 "end": segment.end,
                 "original": segment.text,
+                "auto_repaired": False,
             }
         )
+        confidence, valid = normalize_repair_confidence(normalized.repair_confidence)
+        reason = normalized.repair_reason
+        if not valid:
+            reason = repair_reason_with_confidence_note(reason, normalized.repair_confidence)
+        normalized = normalized.model_copy(update={
+            "repair_confidence": confidence,
+            "repair_reason": reason,
+        })
+        key = _review_dedup_key(normalized)
+        if key in seen_review_keys:
+            continue
+        seen_review_keys.add(key)
         review_items.append(normalized)
         reviews_by_segment.setdefault(item.segment_id, []).append(normalized)
 
-    by_id: dict[int, BilingualLine] = {}
+    lines_by_segment: dict[int, list[BilingualLine]] = {}
     for line in result.bilingual_lines:
         segment = expected.get(line.segment_id)
-        if segment is None or line.segment_id in by_id or not line.translation_zh.strip():
+        if segment is None:
             continue
+        confidence, valid = normalize_repair_confidence(line.repair_confidence)
+        reason = line.repair_reason
+        if not valid:
+            reason = repair_reason_with_confidence_note(reason, line.repair_confidence)
+        line = line.model_copy(update={
+            "repair_confidence": confidence,
+            "repair_reason": reason,
+        })
+        # Keep a retryable or blocked row even when its translation is empty;
+        # dropping it would lose the program-owned state from a recovered
+        # cache.  Duplicates are resolved below in favor of a translated row.
+        if not line.translation_zh.strip() and line.translation_status == TRANSLATION_STATUS_TRANSLATED:
+            continue
+        lines_by_segment.setdefault(line.segment_id, []).append(line)
+
+    by_id: dict[int, BilingualLine] = {}
+    for segment_id, candidates in lines_by_segment.items():
+        line = max(enumerate(candidates), key=lambda item: (_line_priority(item[1]), -item[0]))[1]
+        segment = expected[segment_id]
         related_reviews = reviews_by_segment.get(line.segment_id, [])
         review_reason = "；".join(
             dict.fromkeys(item.reason_zh.strip() for item in related_reviews if item.reason_zh.strip())
         )
         asr_reviews = [item for item in related_reviews if _review_is_asr_related(item)]
+        selection = select_repair_candidate(line, related_reviews)
+        selected = selection.candidate
+        line_candidate = (
+            select_repair_candidate(line, ()).candidate
+            if line.corrected_original.strip()
+            else None
+        )
+        if (
+            line_candidate is not None
+            and selected is not None
+            and line_candidate.text != selected.text
+        ):
+            # Selecting a review candidate must not erase a distinct
+            # candidate that was supplied directly on the bilingual line.
+            # Keep it as a separate review tuple so a later repair pass still
+            # sees the conflict after canonicalization has run again.
+            displaced = ReviewItem(
+                segment_id=line.segment_id,
+                start=segment.start,
+                end=segment.end,
+                original=segment.text,
+                corrected_original=line_candidate.text,
+                repair_confidence=line_candidate.confidence,
+                repair_reason=line_candidate.reason,
+                reason_zh=(
+                    line.review_reason.strip()
+                    or line_candidate.reason
+                    or "源语言修复候选需要人工核对。"
+                ),
+                risk_type="ASR" if line.asr_suspect else "复核",
+                auto_repaired=False,
+            )
+            displaced_key = _review_dedup_key(displaced)
+            if displaced_key not in seen_review_keys:
+                seen_review_keys.add(displaced_key)
+                review_items.append(displaced)
+                related_reviews = [*related_reviews, displaced]
+        status = line.translation_status
         by_id[line.segment_id] = line.model_copy(
             update={
                 "start": segment.start,
                 "end": segment.end,
                 "original": segment.text,
-                "corrected_original": (
-                    line.corrected_original.strip()
-                    or next(
-                        (
-                            item.corrected_original.strip()
-                            for item in related_reviews
-                            if item.corrected_original.strip()
-                        ),
-                        "",
-                    )
+                # Candidate text, confidence and reason are selected as one
+                # atomic proposal.  Never combine one candidate's text with
+                # another candidate's score or explanation.
+                "corrected_original": selected.text if selected else "",
+                "repair_confidence": selected.confidence if selected else 0.0,
+                "repair_reason": selected.reason if selected else "",
+                "auto_repaired": False,
+                "review_required": (
+                    line.review_required
+                    or bool(related_reviews)
+                    or status in {
+                        TRANSLATION_STATUS_MISSING,
+                        TRANSLATION_STATUS_BLOCKED_ASR_REVIEW,
+                    }
                 ),
-                "repair_confidence": max(
-                    [line.repair_confidence, *[item.repair_confidence for item in related_reviews]]
-                ),
-                "repair_reason": (
-                    line.repair_reason.strip()
-                    or next(
-                        (
-                            item.repair_reason.strip() or item.reason_zh.strip()
-                            for item in related_reviews
-                            if item.corrected_original.strip()
-                        ),
-                        "",
-                    )
-                ),
-                "review_required": line.review_required or bool(related_reviews),
                 "review_reason": line.review_reason.strip() or review_reason,
-                "asr_suspect": line.asr_suspect or bool(asr_reviews),
+                "asr_suspect": (
+                    line.asr_suspect
+                    or status == TRANSLATION_STATUS_BLOCKED_ASR_REVIEW
+                    or bool(asr_reviews)
+                ),
                 "asr_issue": line.asr_issue.strip()
                 or "；".join(
                     dict.fromkeys(item.reason_zh.strip() for item in asr_reviews if item.reason_zh.strip())
@@ -627,6 +805,29 @@ def _canonicalize_result(result: ChunkAnalysisResult, chunk: AnalysisChunk) -> C
     )
 
 
+def _review_dedup_key(item: ReviewItem) -> tuple:
+    confidence, _ = normalize_repair_confidence(item.repair_confidence)
+    return (
+        item.segment_id,
+        " ".join(item.original.split()),
+        " ".join(item.reason_zh.split()),
+        " ".join(item.risk_type.split()),
+        " ".join(item.corrected_original.split()),
+        round(confidence, 6),
+        " ".join(item.repair_reason.split()),
+    )
+
+
+def _line_priority(line: BilingualLine) -> int:
+    if line.translation_status == TRANSLATION_STATUS_TRANSLATED and line.translation_zh.strip():
+        return 3
+    if line.translation_status == TRANSLATION_STATUS_BLOCKED_ASR_REVIEW:
+        return 2
+    if line.translation_status == TRANSLATION_STATUS_MISSING and line.translation_zh.strip():
+        return 1
+    return 0
+
+
 def _review_is_asr_related(item) -> bool:
     text = f"{item.risk_type} {item.reason_zh}".lower()
     return any(
@@ -640,20 +841,52 @@ def _merge_supplement(
     supplement: ChunkAnalysisResult,
     chunk: AnalysisChunk,
 ) -> ChunkAnalysisResult:
+    # A coverage response must only replace rows that were retryable missing.
+    # Successful translations are retained even if a supplement repeats their
+    # segment_id, and blocked ASR rows are never unblocked by a model response.
+    lines_by_id = {line.segment_id: line for line in result.bilingual_lines}
+    for line in supplement.bilingual_lines:
+        current = lines_by_id.get(line.segment_id)
+        if current is None:
+            lines_by_id[line.segment_id] = line
+        elif current.translation_status == TRANSLATION_STATUS_MISSING:
+            lines_by_id[line.segment_id] = line
     merged = result.model_copy(
-        update={"bilingual_lines": [*result.bilingual_lines, *supplement.bilingual_lines]}
+        update={
+            "bilingual_lines": list(lines_by_id.values()),
+            "review_items": [*result.review_items, *supplement.review_items],
+        }
     )
     return _canonicalize_result(merged, chunk)
 
 
 def _missing_segments(result: ChunkAnalysisResult, chunk: AnalysisChunk):
-    present = {line.segment_id for line in result.bilingual_lines if line.translation_zh.strip()}
+    present = {
+        line.segment_id
+        for line in result.bilingual_lines
+        if line.translation_status in {
+            TRANSLATION_STATUS_TRANSLATED,
+            TRANSLATION_STATUS_BLOCKED_ASR_REVIEW,
+        }
+        and (line.translation_zh.strip() or line.translation_status == TRANSLATION_STATUS_BLOCKED_ASR_REVIEW)
+    }
     return [segment for segment in chunk.segments if segment.segment_id not in present]
 
 
+def _blocked_segments(result: ChunkAnalysisResult, chunk: AnalysisChunk):
+    expected_ids = {segment.segment_id for segment in chunk.segments}
+    return [
+        line
+        for line in result.bilingual_lines
+        if line.segment_id in expected_ids
+        and line.translation_status == TRANSLATION_STATUS_BLOCKED_ASR_REVIEW
+    ]
+
+
 def _add_fallback_lines(result: ChunkAnalysisResult, missing, chunk: AnalysisChunk) -> ChunkAnalysisResult:
-    fallback_lines = [
-        BilingualLine(
+    by_id = {line.segment_id: line for line in result.bilingual_lines}
+    for segment in missing:
+        fallback = BilingualLine(
             segment_id=segment.segment_id,
             start=segment.start,
             end=segment.end,
@@ -664,10 +897,25 @@ def _add_fallback_lines(result: ChunkAnalysisResult, missing, chunk: AnalysisChu
             review_required=True,
             review_reason=FALLBACK_TRANSLATION_NOTE,
             confidence=0.0,
+            translation_status=TRANSLATION_STATUS_MISSING,
         )
-        for segment in missing
-    ]
-    merged = result.model_copy(update={"bilingual_lines": [*result.bilingual_lines, *fallback_lines]})
+        existing = by_id.get(segment.segment_id)
+        if existing is not None and existing.translation_status == TRANSLATION_STATUS_MISSING:
+            fallback = existing.model_copy(update={
+                "start": segment.start,
+                "end": segment.end,
+                "original": segment.text,
+                "translation_zh": fallback.translation_zh,
+                "literal_zh": fallback.literal_zh,
+                "brief_note": FALLBACK_TRANSLATION_NOTE,
+                "review_required": True,
+                "review_reason": FALLBACK_TRANSLATION_NOTE,
+                "confidence": 0.0,
+                "translation_status": TRANSLATION_STATUS_MISSING,
+                "auto_repaired": False,
+            })
+        by_id[segment.segment_id] = fallback
+    merged = result.model_copy(update={"bilingual_lines": list(by_id.values())})
     return _canonicalize_result(merged, chunk)
 
 
@@ -677,20 +925,75 @@ def _fallback_chunk_result(chunk: AnalysisChunk) -> ChunkAnalysisResult:
 
 
 def _result_has_fallback(result: ChunkAnalysisResult) -> bool:
-    return any(line.brief_note == FALLBACK_TRANSLATION_NOTE for line in result.bilingual_lines)
+    return any(_line_has_fallback(line) for line in result.bilingual_lines)
+
+
+def _cache_result_is_reusable(result: ChunkAnalysisResult) -> bool:
+    """Whether a cache has a row worth retaining across a failed retry."""
+    return any(
+        line.translation_status in {
+            TRANSLATION_STATUS_TRANSLATED,
+            TRANSLATION_STATUS_BLOCKED_ASR_REVIEW,
+        }
+        for line in result.bilingual_lines
+    )
+
+
+def _line_has_fallback(line: BilingualLine) -> bool:
+    return (
+        line.translation_status in {
+            TRANSLATION_STATUS_MISSING,
+            TRANSLATION_STATUS_BLOCKED_ASR_REVIEW,
+        }
+        or line.brief_note.strip() == FALLBACK_TRANSLATION_NOTE
+        or line.translation_zh.lstrip().startswith("[翻译暂缺]")
+    )
+
+
+def _misaligned_cache_segment_ids(result: ChunkAnalysisResult, chunk: AnalysisChunk) -> set[int]:
+    expected = {segment.segment_id: segment for segment in chunk.segments}
+    misaligned: set[int] = set()
+    for line in result.bilingual_lines:
+        segment = expected.get(line.segment_id)
+        if segment is None:
+            continue
+        if (
+            abs(line.start - segment.start) > 0.01
+            or abs(line.end - segment.end) > 0.01
+            or line.original != segment.text
+        ):
+            misaligned.add(line.segment_id)
+    return misaligned
+
+
+def _drop_misaligned_cache_rows(
+    result: ChunkAnalysisResult,
+    segment_ids: set[int],
+) -> ChunkAnalysisResult:
+    return result.model_copy(update={
+        "bilingual_lines": [
+            line for line in result.bilingual_lines
+            if line.segment_id not in segment_ids
+        ],
+        "review_items": [
+            item for item in result.review_items
+            if item.segment_id is None or item.segment_id not in segment_ids
+        ],
+    })
 
 
 def _update_quality_metadata(document: AnalysisDocument) -> None:
-    review_items = [item for chunk in document.chunks for item in chunk.review_items]
+    effective_review_items = collect_effective_review_items(document)
     review_segments = {
-        (chunk.chunk_id, item.segment_id)
-        for chunk in document.chunks
-        for item in chunk.review_items
+        (chunk_id, item.segment_id)
+        for chunk_id, item in effective_review_items
         if item.segment_id is not None
     }
-    document.meta.review_items = len(review_items)
+    document.meta.review_items = len(effective_review_items)
     document.meta.review_segments = len(review_segments)
-    document.meta.unresolved_review_items = sum(1 for item in review_items if not item.auto_repaired)
+    document.meta.unresolved_review_items = sum(
+        1 for _, item in effective_review_items if not item.auto_repaired
+    )
     if not document.meta.total_chunks or document.meta.failed_chunks >= document.meta.total_chunks:
         document.meta.quality_status = "failed"
     elif document.meta.failed_chunks or document.meta.fallback_lines:
@@ -709,7 +1012,12 @@ def _chunk_coverage_issues(result: ChunkAnalysisResult, chunk: AnalysisChunk) ->
     missing = [segment_id for segment_id in expected if segment_id not in actual_set]
     unknown = sorted(actual_set - set(expected))
     duplicates = sorted({segment_id for segment_id in actual_ids if actual_ids.count(segment_id) > 1})
-    empty = sorted(line.segment_id for line in result.bilingual_lines if not line.translation_zh.strip())
+    empty = sorted(
+        line.segment_id
+        for line in result.bilingual_lines
+        if not line.translation_zh.strip()
+        and line.translation_status != TRANSLATION_STATUS_BLOCKED_ASR_REVIEW
+    )
     misaligned = sorted(
         line.segment_id
         for line in result.bilingual_lines

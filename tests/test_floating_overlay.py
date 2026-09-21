@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import app.floating_overlay as floating_overlay
 from app.floating_overlay import write_floating_subtitle_overlay, write_overlay_launcher
 
 
@@ -41,3 +42,42 @@ def test_generated_overlay_launcher_is_clickable_without_pyw_association(tmp_pat
     assert 'set "SCRIPT=%~dp0floating_subtitle_overlay.pyw"' in content
     assert 'set "PYTHONW=' in content
     assert 'start "" "%PYTHONW%" "%SCRIPT%" %*' in content
+
+
+def test_overlay_launcher_keeps_relative_pythonw_reference_relative(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "video" / "run.cmd"
+    monkeypatch.setattr(
+        floating_overlay.os.path,
+        "relpath",
+        lambda source, start: r"..\project\.venv\Scripts\pythonw.exe",
+    )
+
+    write_overlay_launcher(target, "floating_subtitle_overlay.pyw")
+    content = target.read_text(encoding="utf-8")
+
+    assert r'set "PYTHONW=%~dp0..\project\.venv\Scripts\pythonw.exe"' in content
+
+
+def test_overlay_launcher_does_not_prefix_absolute_pythonw_path(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "video" / "run.cmd"
+
+    def raise_different_drive(*args) -> str:
+        raise ValueError("different drives")
+
+    monkeypatch.setattr(
+        floating_overlay.os.path,
+        "relpath",
+        raise_different_drive,
+    )
+    expected = str(
+        Path(floating_overlay.__file__).resolve().parents[1]
+        / ".venv"
+        / "Scripts"
+        / "pythonw.exe"
+    )
+
+    write_overlay_launcher(target, "floating_subtitle_overlay.pyw")
+    content = target.read_text(encoding="utf-8")
+
+    assert f'set "PYTHONW={expected}"' in content
+    assert f'set "PYTHONW=%~dp0{expected}"' not in content
