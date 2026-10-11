@@ -1,7 +1,7 @@
 -c constraints.txt
 faster-whisper
 yt-dlp
-pydantic>=2.0
+pydantic>=2.13.5
 PyYAML
 rich
 tzdata
