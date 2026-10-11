@@ -11,6 +11,8 @@ env/
 *.env
 secrets.local.env
 config.local.yaml
+# Legacy data-root overrides; shared defaults live in app/defaults.yaml.
+/config.yaml
 
 # Runtime and generated output
 output/
@@ -22,6 +24,8 @@ models/
 # Build and packaged artifacts
 build/
 dist/
+/tools/*
+!/tools/README.md
 *.exe
 *.spec.bak
 

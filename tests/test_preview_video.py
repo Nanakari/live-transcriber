@@ -17,6 +17,7 @@ from app.utils import RunLogger
 
 
 def test_default_audio_preview_skips_video_encoding(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(preview, "_bundle_audio_runtime_tools", lambda *a: {})
     audio = tmp_path / "audio.m4a"
     subtitle = tmp_path / "translation_zh.srt"
     output_dir = tmp_path / "audio_preview"
@@ -266,7 +267,9 @@ def test_original_subtitle_copy_requires_related_exact_candidate(tmp_path: Path,
     transcript_root = tmp_path / "outputs" / "transcripts"
     transcript_root.mkdir(parents=True)
     (transcript_root / "unrelated_transcript.srt").write_text("错的原文", encoding="utf-8")
-    monkeypatch.setattr(preview, "project_root", lambda: tmp_path)
+    from app import preview_subtitles
+
+    monkeypatch.setattr(preview_subtitles, "project_root", lambda: tmp_path)
 
     assert preview.maybe_copy_original_subtitle(subtitle, output_dir) is None
     (transcript_root / "wanted_transcript.srt").write_text("正确的原文", encoding="utf-8")
@@ -351,6 +354,7 @@ def test_long_translation_without_punctuation_stays_proportional() -> None:
 
 
 def test_preview_prefers_bilingual_subtitle_for_burn_in(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(preview, "_bundle_audio_runtime_tools", lambda *a: {})
     audio = tmp_path / "audio.m4a"
     subtitle = tmp_path / "translation_zh.srt"
     cover = tmp_path / "thumbnail.jpg"
@@ -384,7 +388,6 @@ def test_preview_prefers_bilingual_subtitle_for_burn_in(monkeypatch, tmp_path: P
     monkeypatch.setattr(preview, "maybe_write_bilingual_subtitle", fake_bilingual)
     monkeypatch.setattr(preview, "maybe_write_study_subtitle", lambda *args: None)
     monkeypatch.setattr(preview, "build_preview_video", fake_build)
-    monkeypatch.setattr(preview, "copy_learning_notes", lambda *args: {})
     monkeypatch.setattr(preview, "write_readme", lambda *args, **kwargs: None)
 
     preview.create_potplayer_preview(

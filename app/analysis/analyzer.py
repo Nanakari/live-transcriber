@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
-from app.config import project_root
+from app.config import output_root, project_root
 from app.utils import AppError, RunLogger, generate_run_id
 from app.output_layout import ensure_media_subdirs, group_dir_from_artifact_path, group_name_from_stem, media_group_dir, write_media_index
 
@@ -23,7 +24,7 @@ from .cache import (
 from .chunker import load_transcript, make_chunks, transcript_segments
 from .exporters import export_all
 from .summary import generate_video_summary
-from .gemini_client import GeminiClient, LLMClient, LocalLLMClient, parse_json_text
+from .gemini_client import GeminiClient, LLMClient, LocalLLMClient, PermanentAnalysisError, parse_json_text
 from .prompts import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
@@ -42,6 +43,7 @@ from .schemas import (
     AnalysisChunk,
     AnalysisDocument,
     AnalysisMeta,
+    AnalysisSegment,
     BilingualLine,
     ChunkAnalysisResult,
     FailedChunk,
@@ -120,7 +122,7 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
         group_dir = media_group_dir(group_name_from_stem(document.meta.run_id or options.input_file.stem))
     media_dirs = ensure_media_subdirs(group_dir)
     output_dir = media_dirs["analysis"] / analysis_run_id
-    shared_cache_dir = project_root() / "outputs" / "cache" / "analysis"
+    shared_cache_dir = output_root(root=project_root()) / "cache" / "analysis"
     chunks_dir = output_dir / "chunks"
     failed_dir = output_dir / "failed"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -186,7 +188,7 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
                     # normalization can rewrite those fields.  Remove only
                     # the affected rows and let coverage recovery request
                     # those segment IDs.
-                    cached = _drop_misaligned_cache_rows(cached, misaligned_ids)
+                    cached = _drop_misaligned_rows(cached, misaligned_ids)
                 cached = _canonicalize_result(cached, chunk)
                 coverage_issues = _chunk_coverage_issues(cached, chunk)
                 retryable_missing = _missing_segments(cached, chunk)
@@ -241,11 +243,16 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
 
         pending.append((index, chunk, result_path, shared_result_path, cached_for_recovery))
 
+    permanent_error: PermanentAnalysisError | None = None
+
     def process_pending(
         item: tuple[int, AnalysisChunk, Path, Path, ChunkAnalysisResult | None],
     ) -> tuple[int, ChunkAnalysisResult, FailedChunk | None]:
+        nonlocal permanent_error
         index, chunk, result_path, shared_result_path, cached_for_recovery = item
         try:
+            if permanent_error is not None:
+                raise PermanentAnalysisError(f"已停止后续请求：{permanent_error}")
             result = _process_chunk(
                 client,
                 chunk,
@@ -264,6 +271,9 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
                 save_chunk_result(shared_result_path, result)
             return index, result, None
         except Exception as exc:
+            if isinstance(exc, PermanentAnalysisError) and permanent_error is None:
+                permanent_error = exc
+                logger.write(f"analysis stopped: {exc}; preserving completed results")
             raw_text = getattr(exc, "raw_text", "")
             failed_path = save_failed_response(failed_dir, chunk.chunk_id, raw_text, str(exc))
             failed_chunk = FailedChunk(
@@ -272,12 +282,13 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
                 raw_response_file=str(failed_path),
             )
             logger.write(f"failed {chunk.chunk_id}: {exc}")
-            if cached_for_recovery is not None:
+            retained_result = getattr(exc, "partial_result", None) or cached_for_recovery
+            if retained_result is not None:
                 # A coverage-only recovery failure must retain every good row
                 # already present in the cache.  Fill only the retryable IDs;
                 # never replace a partially recovered chunk with a full
                 # fallback result.
-                retained = _canonicalize_result(cached_for_recovery, chunk)
+                retained = _canonicalize_result(retained_result, chunk)
                 missing = _missing_segments(retained, chunk)
                 fallback_result = _add_fallback_lines(retained, missing, chunk)
                 logger.write(
@@ -358,8 +369,13 @@ def run_analysis(options: AnalyzeOptions) -> dict[str, Any]:
         auto_repair_enabled=options.auto_repair_enabled,
         auto_repair_threshold=options.auto_repair_threshold,
     )
-    analysis_document = AnalysisDocument(meta=meta, chunks=ordered_results, failed_chunks=failed)
-    if options.summary:
+    analysis_document = AnalysisDocument(
+        meta=meta, chunks=ordered_results, failed_chunks=failed,
+        analysis_error=str(permanent_error) if permanent_error else "",
+    )
+    if options.summary and permanent_error:
+        analysis_document.video_summary_error = f"请求已停止，保留已有分段摘要：{permanent_error}"
+    if options.summary and not permanent_error:
         summary_key = summary_cache_key(
             analysis_document,
             prompt_version=PROMPT_VERSION,
@@ -594,11 +610,28 @@ def _parse_chunk_result(
     parsed.setdefault("start", chunk.start)
     parsed.setdefault("end", chunk.end)
     try:
-        return ChunkAnalysisResult.model_validate(parsed)
+        result = ChunkAnalysisResult.model_validate(parsed)
     except Exception as exc:
         wrapped = AppError(f"模型 JSON 字段校验失败：{exc}")
         setattr(wrapped, "raw_text", raw)
         raise wrapped from exc
+    # Validate evidence while we can still distinguish omitted source fields
+    # from values supplied by the model. Canonicalization would erase a swapped
+    # source/timeline and make the associated translation look cacheable.
+    expected = {segment.segment_id: segment for segment in chunk.segments}
+    misaligned_ids = {
+        item.segment_id
+        for item in [*result.bilingual_lines, *result.review_items]
+        if item.segment_id in expected
+        and _source_fields_misaligned(item, expected[item.segment_id], supplied_only=True)
+    }
+    if misaligned_ids:
+        logger.write(
+            f"reject misaligned response {chunk.chunk_id}: "
+            f"segment_ids={sorted(misaligned_ids)}; request coverage again"
+        )
+        result = _drop_misaligned_rows(result, misaligned_ids)
+    return result
 
 
 def _complete_chunk_coverage(
@@ -637,6 +670,9 @@ def _complete_chunk_coverage(
             )
             supplement = _parse_chunk_result(raw, chunk, logger)
             result = _merge_supplement(result, supplement, chunk)
+        except PermanentAnalysisError as exc:
+            exc.partial_result = result
+            raise
         except Exception as exc:
             logger.write(f"coverage retry failed {chunk.chunk_id}: {exc}")
             continue
@@ -957,16 +993,30 @@ def _misaligned_cache_segment_ids(result: ChunkAnalysisResult, chunk: AnalysisCh
         segment = expected.get(line.segment_id)
         if segment is None:
             continue
-        if (
-            abs(line.start - segment.start) > 0.01
-            or abs(line.end - segment.end) > 0.01
-            or line.original != segment.text
-        ):
+        if _source_fields_misaligned(line, segment):
             misaligned.add(line.segment_id)
     return misaligned
 
 
-def _drop_misaligned_cache_rows(
+def _source_fields_misaligned(
+    item: BilingualLine | ReviewItem,
+    segment: AnalysisSegment,
+    *,
+    supplied_only: bool = False,
+) -> bool:
+    fields = item.model_fields_set if supplied_only else {"original", "start", "end"}
+    if "original" in fields and item.original != segment.text:
+        return True
+    for name in ("start", "end"):
+        if name not in fields:
+            continue
+        value = getattr(item, name)
+        if value is None or not math.isfinite(value) or abs(value - getattr(segment, name)) > 0.01:
+            return True
+    return False
+
+
+def _drop_misaligned_rows(
     result: ChunkAnalysisResult,
     segment_ids: set[int],
 ) -> ChunkAnalysisResult:
@@ -994,7 +1044,7 @@ def _update_quality_metadata(document: AnalysisDocument) -> None:
     document.meta.unresolved_review_items = sum(
         1 for _, item in effective_review_items if not item.auto_repaired
     )
-    if not document.meta.total_chunks or document.meta.failed_chunks >= document.meta.total_chunks:
+    if document.analysis_error or not document.meta.total_chunks or document.meta.failed_chunks >= document.meta.total_chunks:
         document.meta.quality_status = "failed"
     elif document.meta.failed_chunks or document.meta.fallback_lines:
         document.meta.quality_status = "partial"

@@ -1,0 +1,9 @@
+# This desktop application runs from a checkout or a PyInstaller distribution.
+# Dependencies remain in requirements*.txt with one shared constraints.txt.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--strict-config --strict-markers"
+markers = [
+  "local: optional checks against tools installed outside the repository",
+]

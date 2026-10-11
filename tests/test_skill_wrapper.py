@@ -11,6 +11,7 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 SKILL_WRAPPER = CODEX_HOME / "skills" / "live-transcriber" / "scripts" / "run_live_transcriber.ps1"
 
 
+@pytest.mark.local
 @pytest.mark.skipif(not SKILL_WRAPPER.is_file(), reason="installed live-transcriber Skill is not available")
 def test_wrapper_dispatches_local_provider_and_default_repair_threshold() -> None:
     script = SKILL_WRAPPER.read_text(encoding="utf-8-sig")

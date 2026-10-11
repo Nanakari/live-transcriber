@@ -15,7 +15,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from ..config import project_root, resource_root
+from ..config import output_root, project_root, resource_root
 from ..utils import generate_run_id, hidden_process_flags
 
 
@@ -135,7 +135,7 @@ class JobManager:
                     detail="当前已有任务正在运行。请等待完成后再启动新任务。",
                 )
             job_id = generate_run_id()
-            log_dir = project_root() / "outputs" / "logs" / "web_jobs"
+            log_dir = output_root(root=project_root()) / "logs" / "web_jobs"
             log_dir.mkdir(parents=True, exist_ok=True)
             job = Job(
                 job_id=job_id,
@@ -282,18 +282,24 @@ class JobManager:
 
 
 def guess_output_dir(module: str, start_time: datetime) -> str | None:
-    root = project_root()
-    if module == "preview":
-        base = root / "outputs" / "previews"
-        return _latest_dir_after(base, start_time)
+    outputs = output_root(root=project_root())
+    if module in {"analyze", "preview"}:
+        if module == "analyze":
+            candidates = [*outputs.glob("media/*/analysis/*"), *outputs.glob("analysis/*")]
+        else:
+            candidates = [*outputs.glob("media/*/audio"), *outputs.glob("media/*/video"),
+                          *outputs.glob("media/*/previews/*"), *outputs.glob("previews/*"),
+                          *outputs.glob("previews/*/audio"), *outputs.glob("previews/*/video")]
+            candidates = [path for path in candidates if (path / "assets/manifest.json").exists()
+                          or (path / "live_preview.mp4").exists()
+                          or (path / "audio_subtitle_player.pyw").exists()]
+        candidates = [path for path in candidates if path.is_dir() and path.stat().st_mtime >= start_time.timestamp() - 2]
+        return str(max(candidates, key=lambda path: path.stat().st_mtime_ns).resolve()) if candidates else None
     if module == "pipeline":
-        base = root / "outputs" / "media"
-        return _latest_dir_after(base, start_time)
-    if module == "analyze":
-        base = root / "outputs" / "analysis"
+        base = outputs / "media"
         return _latest_dir_after(base, start_time)
     if module == "transcribe":
-        return str((root / "outputs").resolve())
+        return str(outputs)
     return None
 
 

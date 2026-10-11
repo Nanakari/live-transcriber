@@ -1,4 +1,4 @@
-param([string]$Version = '0.2.4', [switch]$SkipInstall)
+param([string]$Version = 'dev', [switch]$SkipInstall)
 $ErrorActionPreference = 'Stop'
 $projectDir = Split-Path $PSScriptRoot -Parent
 if ($Version -notmatch '^[0-9A-Za-z][0-9A-Za-z._-]*$') { throw 'Invalid version label.' }
@@ -6,17 +6,17 @@ Push-Location $projectDir
 try {
     if (-not $SkipInstall) { & .\setup.ps1 -Dev }
     $buildPython = Join-Path $projectDir '.venv\Scripts\python.exe'
-    & $buildPython -m pytest -q
-    if ($LASTEXITCODE -ne 0) { throw 'Tests failed; build stopped.' }
-    & node tests/test_workbench_results.js
-    if ($LASTEXITCODE -ne 0) { throw 'Workbench tests failed; build stopped.' }
+    & $buildPython -m scripts.check
+    if ($LASTEXITCODE -ne 0) { throw 'Project checks failed; build stopped.' }
     & $buildPython scripts\release_assets.py
     if ($LASTEXITCODE -ne 0) { throw 'Failed to prepare release resources.' }
     $versionDir = Join-Path 'dist' $Version
-    & $buildPython -m PyInstaller --noconfirm --clean --distpath $versionDir live_transcriber.spec
+    $workDir = Join-Path 'build' $Version
+    & $buildPython -m PyInstaller --noconfirm --clean --distpath $versionDir --workpath $workDir live_transcriber.spec
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
     $releaseDir = Join-Path $projectDir "$versionDir\LiveTranscriber"
-    Copy-Item -LiteralPath start.bat,README.md,LICENSE,THIRD_PARTY_NOTICES.md -Destination $releaseDir
+    Copy-Item -LiteralPath start.bat,README.md,CONTRIBUTING.md,SECURITY.md,LICENSE,THIRD_PARTY_NOTICES.md,config.local.example.yaml -Destination $releaseDir
+    Copy-Item -LiteralPath docs -Destination $releaseDir -Recurse -Force
     & $buildPython scripts\smoke_release.py $releaseDir
     if ($LASTEXITCODE -ne 0) { throw 'Release smoke checks failed; package was not created.' }
     $archive = Join-Path $projectDir "dist\LiveTranscriber-$Version-windows-x64.zip"

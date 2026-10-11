@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import json
@@ -8,16 +8,35 @@ import socket
 import sys
 import io
 import zipfile
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 
-from ..config import load_config, project_root, resource_root, tool_path
-from ..output_layout import ensure_media_subdirs, group_dir_from_artifact_path, group_name_from_stem, media_group_dir, media_root
-from ..utils import command_exists, is_cuda_available
+from ..config import output_root, load_config, project_root, resource_root, tool_path
+from ..output_layout import group_dir_from_artifact_path, media_root
+from ..utils import AppError, command_exists, is_cuda_available
+from ..player_package import build_player_archive
+# Keep established helper imports compatible; new domain callers use the catalog.
+from ..artifact_catalog import (
+    artifact_sets as _artifact_sets,
+    artifact_group_dir as _artifact_group_dir,
+    path_storage as _path_storage,
+    recent_files as _recent_files_many,
+    recent_dirs as _recent_dirs_many,
+    latest_analysis as _latest_analysis,
+    latest_preview as _latest_preview,
+    mark_preview_freshness as _mark_preview_freshness,
+    preview_transcript_run_id as _preview_transcript_run_id,
+    run_id_from_audio_path as _run_id_from_audio_path,
+    analysis_transcript_run_id as _analysis_transcript_run_id,
+    analysis_result as _latest_analysis_result,
+    preview_result as _preview_result,
+)
 from .jobs import cli_command_prefix, jobs
 from .lifecycle import lifecycle
 from ..media_assets import default_thumbnail_path
@@ -50,6 +69,8 @@ def status() -> dict[str, Any]:
         "file_picker": os.name == "nt",
         "python": sys.executable,
         "ffmpeg": command_exists("ffmpeg") or bool(tool_path("ffmpeg")),
+        "ffplay": command_exists("ffplay") or bool(tool_path("ffplay")),
+        "ffprobe": command_exists("ffprobe") or bool(tool_path("ffprobe")),
         "yt_dlp": _module_available("yt_dlp"),
         "faster_whisper": _module_available("faster_whisper"),
         "cuda": is_cuda_available(),
@@ -84,19 +105,27 @@ def lifecycle_status() -> dict[str, object]:
 
 @router.get("/api/files/recent")
 def recent_files() -> dict[str, Any]:
+    outputs = output_root(root=project_root())
     root = project_root()
     payload = {
-        "audio": _recent_files_many([root / "outputs" / "media", root / "outputs" / "audio"], ["*.wav", "*.m4a", "*.webm", "*.mp3", "*.opus"], recursive=True),
-        "transcripts": _recent_files_many([root / "outputs" / "media", root / "outputs" / "transcripts"], ["*_transcript.json", "*_transcript.srt", "*_transcript.md", "*_raw_transcript.json"], recursive=True),
-        "analysis_runs": _recent_dirs_many([root / "outputs" / "media", root / "outputs" / "analysis"], recursive=True),
-        "translation_srt": _recent_files_many([root / "outputs" / "media", root / "outputs" / "analysis"], ["translation_zh.srt"], recursive=True),
-        "analysis_texts": _recent_files_many([root / "outputs" / "media", root / "outputs" / "analysis"], ["character_profile.md", "video_summary.md", "study_notes.md", "bilingual.md", "vocabulary.md", "grammar.md", "review.md", "run.log"], recursive=True),
-        "covers": _recent_files_many([root / "outputs" / "media", root / "outputs" / "thumbnails"], ["*.jpg", "*.jpeg", "*.png", "*.webp"], recursive=True),
-        "previews": _recent_dirs_many([root / "outputs" / "media", root / "outputs" / "previews"], recursive=True),
+        "audio": _recent_files_many([outputs / "media", outputs / "audio"], ["*.wav", "*.m4a", "*.webm", "*.mp3", "*.opus"], recursive=True),
+        "transcripts": _recent_files_many([outputs / "media", outputs / "transcripts"], ["*_transcript.json", "*_transcript.srt", "*_transcript.md", "*_raw_transcript.json"], recursive=True),
+        "analysis_runs": _recent_dirs_many([outputs / "media", outputs / "analysis"], recursive=True),
+        "translation_srt": _recent_files_many([outputs / "media", outputs / "analysis"], ["translation_zh.srt"], recursive=True),
+        "analysis_texts": _recent_files_many([outputs / "media", outputs / "analysis"], ["character_profile.md", "video_summary.md", "study_notes.md", "bilingual.md", "vocabulary.md", "grammar.md", "review.md", "run.log"], recursive=True),
+        "covers": _recent_files_many([outputs / "media", outputs / "thumbnails"], ["*.jpg", "*.jpeg", "*.png", "*.webp"], recursive=True),
+        "previews": _recent_dirs_many([outputs / "media", outputs / "previews"], recursive=True),
     }
-    payload["latest_analysis"] = _latest_item([_latest_analysis(root / "outputs" / "media"), _latest_analysis(root / "outputs" / "analysis")])
-    payload["latest_preview"] = _latest_item([_latest_preview(root / "outputs" / "media"), _latest_preview(root / "outputs" / "previews")])
+    payload["latest_analysis"] = _latest_item([_latest_analysis(outputs / "media"), _latest_analysis(outputs / "analysis")])
+    payload["latest_preview"] = _latest_item([_latest_preview(outputs / "media"), _latest_preview(outputs / "previews")])
     payload["artifact_sets"] = _artifact_sets(root)
+    latest_preview = payload["latest_preview"]
+    if latest_preview:
+        analyses = {item["run_id"]: item["analysis"] for item in payload["artifact_sets"] if item.get("analysis")}
+        run_id = _preview_transcript_run_id(Path(latest_preview["path"]), analyses)
+        artifact = next((item for item in payload["artifact_sets"] if item["run_id"] == run_id), None)
+        if artifact and artifact.get("analysis"):
+            _mark_preview_freshness(latest_preview, artifact["analysis"])
     return payload
 
 
@@ -310,13 +339,14 @@ def _require_analysis_key(api_key: str) -> None:
 def download_result(path: str = Query(...)):
     target = resolve_allowed_path(path)
     try:
-        target.relative_to((project_root() / "outputs").resolve())
+        target.relative_to((output_root(root=project_root())).resolve())
     except ValueError:
         raise HTTPException(status_code=403, detail="只能下载处理结果。")
     if target.suffix.lower() not in {".txt", ".md", ".json", ".srt", ".log", ".yaml", ".yml", ".mp4", ".pyw", ".cmd"}:
         raise HTTPException(status_code=403, detail="该文件类型不能下载。")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="文件不存在。")
+    _require_current_playback(str(target))
     return FileResponse(target, filename=target.name)
 
 
@@ -340,6 +370,53 @@ def export_artifact(run_id: str):
     buffer.seek(0)
     return StreamingResponse(buffer, media_type="application/zip",
                              headers={"Content-Disposition": 'attachment; filename="transcriber-results.zip"'})
+
+
+def _remove_player_export(directory: Path, staging: Path) -> None:
+    target = directory.resolve()
+    if target.parent != staging.resolve() or not target.name.startswith("player-export-"):
+        raise ValueError("Invalid player export staging directory")
+    shutil.rmtree(target)
+
+
+@router.get("/api/artifacts/{run_id}/player-export")
+def export_player(run_id: str):
+    if jobs.has_running_jobs():
+        raise HTTPException(status_code=409, detail="请等待当前任务完成后再导出播放器。")
+    item = next((item for item in _artifact_sets(project_root()) if item["run_id"] == run_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="没有找到任务。")
+    preview = item.get("preview") or {}
+    if preview.get("audio_stale"):
+        raise HTTPException(status_code=409, detail=preview["stale_reason"])
+    files = preview.get("files", {})
+    launcher = files.get("run_audio_subtitle_player.cmd")
+    subtitle = files.get("audio_mode.bilingual.srt")
+    audio = item.get("audio") or item.get("clean_audio")
+    if not launcher or not subtitle or not audio:
+        raise HTTPException(status_code=409, detail="请先生成音频播放器，再导出完整播放器包。")
+    manifest_path = resolve_allowed_path(launcher["path"]).parent / "assets" / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        audio_reference = manifest.get("audio") or audio["path"]
+    except (OSError, ValueError, AttributeError):
+        raise HTTPException(status_code=409, detail="播放器清单不可读取，请重新生成播放器。")
+    audio_path = resolve_allowed_path(str(audio_reference))
+    subtitle_path = resolve_allowed_path(subtitle["path"], must_be_text=True)
+    staging = output_root(root=project_root()) / "_staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="player-export-", dir=staging)).resolve()
+    archive = directory / "audio-player.zip"
+    try:
+        build_player_archive(audio_path, subtitle_path, archive)
+        _require_current_playback(launcher["path"])
+    except Exception as exc:
+        _remove_player_export(directory, staging)
+        if isinstance(exc, AppError):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise
+    return FileResponse(archive, filename="audio-player.zip", media_type="application/zip",
+                        background=BackgroundTask(_remove_player_export, directory, staging))
 
 
 @router.get("/api/jobs")
@@ -382,7 +459,9 @@ def open_output_folder(payload: dict[str, Any] = Body(...)) -> dict[str, str]:
 
 @router.post("/api/open-file")
 def open_output_file(payload: dict[str, Any] = Body(...)) -> dict[str, str]:
-    return open_file(str(payload.get("path") or ""))
+    path = str(payload.get("path") or "")
+    _require_current_playback(path)
+    return open_file(path)
 
 
 @router.get("/api/browse-file")
@@ -392,8 +471,8 @@ def browse_local_file(kind: str = Query("media")) -> dict[str, str]:
 
 @router.post("/api/open-potplayer")
 def open_preview_in_potplayer(payload: dict[str, Any] = Body(...)) -> dict[str, str]:
+    _require_current_playback(str(payload.get("video") or ""))
     return open_potplayer(str(payload.get("video") or ""), str(payload.get("subtitle") or ""))
-
 
 
 def _default_preview_output_dir(artifact_run_id: str, subtitle: str, audio: str, *, mode: str = "audio") -> str:
@@ -404,7 +483,7 @@ def _default_preview_output_dir(artifact_run_id: str, subtitle: str, audio: str,
     safe = _safe_run_id(run_id)
     if not safe:
         return ""
-    return str((project_root() / "outputs" / "previews" / safe / ("audio" if mode == "audio" else "video")).resolve())
+    return str((output_root(root=project_root()) / "previews" / safe / ("audio" if mode == "audio" else "video")).resolve())
 
 
 def _default_cover_for_preview(subtitle: str, audio: str) -> str:
@@ -416,7 +495,7 @@ def _default_cover_for_preview(subtitle: str, audio: str) -> str:
             candidates.extend(thumbs.glob(pattern))
         candidates.extend(group_dir.glob("previews/*/cover.jpg"))
         candidates.extend(group_dir.glob("video/assets/cover.jpg"))
-    legacy = project_root() / "outputs" / "thumbnails"
+    legacy = output_root(root=project_root()) / "thumbnails"
     for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
         candidates.extend(legacy.glob(pattern))
     existing = [path for path in candidates if path.exists() and path.is_file()]
@@ -427,24 +506,7 @@ def _default_cover_for_preview(subtitle: str, audio: str) -> str:
 
 
 def _transcript_run_id_from_analysis_file(path: Path) -> str:
-    analysis_json = path.parent / "analysis.json"
-    if not analysis_json.exists():
-        return ""
-    try:
-        import json
-
-        meta = json.loads(analysis_json.read_text(encoding="utf-8")).get("meta", {})
-        return str(meta.get("transcript_run_id") or "").strip()
-    except Exception:
-        return ""
-
-
-def _run_id_from_audio_path(path: Path) -> str:
-    name = path.name
-    for marker in ["_source.", "_clean_16k."]:
-        if marker in name:
-            return name.split(marker, 1)[0]
-    return ""
+    return _analysis_transcript_run_id(path.parent)
 
 
 def _safe_run_id(run_id: str) -> str:
@@ -465,271 +527,17 @@ def _append_optional(command: list[str], flag: str, value: Any) -> None:
         command.extend([flag, str(value)])
 
 
-def _recent_files(base: Path, patterns: list[str], *, recursive: bool = False, limit: int = 30) -> list[dict[str, Any]]:
-    if not base.exists():
-        return []
-    files: list[Path] = []
-    for pattern in patterns:
-        files.extend(base.rglob(pattern) if recursive else base.glob(pattern))
-    files = [path for path in files if path.is_file()]
-    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    return [_file_item(path) for path in files[:limit]]
-
-
-def _recent_files_many(bases: list[Path], patterns: list[str], *, recursive: bool = False, limit: int = 30) -> list[dict[str, Any]]:
-    seen: set[str] = set()
-    files: list[Path] = []
-    for base in bases:
-        if not base.exists():
-            continue
-        for pattern in patterns:
-            candidates = base.rglob(pattern) if recursive else base.glob(pattern)
-            for path in candidates:
-                if not path.is_file():
-                    continue
-                key = str(path.resolve()).lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                files.append(path)
-    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    return [_file_item(path) for path in files[:limit]]
-
-
-def _recent_dirs(base: Path, limit: int = 20) -> list[dict[str, Any]]:
-    if not base.exists():
-        return []
-    dirs = [path for path in base.iterdir() if path.is_dir()]
-    dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    return [_file_item(path) for path in dirs[:limit]]
-
-
-def _recent_dirs_many(bases: list[Path], *, recursive: bool = False, limit: int = 20) -> list[dict[str, Any]]:
-    seen: set[str] = set()
-    dirs: list[Path] = []
-    for base in bases:
-        if not base.exists():
-            continue
-        candidates = base.rglob("*") if recursive else base.iterdir()
-        for path in candidates:
-            if not path.is_dir():
-                continue
-            if path.name in {"audio", "transcripts", "analysis", "previews", "video", "assets", "subtitles", "logs", "thumbnails", "chunks", "failed", "_cache"}:
-                continue
-            key = str(path.resolve()).lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            dirs.append(path)
-    dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    return [_file_item(path) for path in dirs[:limit]]
-
-
-def _latest_analysis(base: Path) -> dict[str, Any] | None:
-    if not base.exists():
-        return None
-    required = ["analysis.json", "bilingual.md", "translation_zh.srt", "review.md"]
-    candidates = [path for path in base.rglob("*") if path.is_dir() and all((path / name).exists() for name in required)]
-    if not candidates:
-        return None
-    run = max(candidates, key=lambda path: path.stat().st_mtime)
-    files = {name: _file_item(run / name) for name in required}
-    for name in ("vocabulary.md", "grammar.md"):
-        if (run / name).exists():
-            files[name] = _file_item(run / name)
-    if (run / "study_notes.md").exists():
-        files["study_notes.md"] = _file_item(run / "study_notes.md")
-    if (run / "video_summary.md").exists():
-        files["video_summary.md"] = _file_item(run / "video_summary.md")
-    if (run / "character_profile.md").exists():
-        files["character_profile.md"] = _file_item(run / "character_profile.md")
-    files["run.log"] = _file_item(run / "run.log") if (run / "run.log").exists() else None
-    return {
-        "name": run.name,
-        "path": str(run.resolve()),
-        "modified": datetime_from_timestamp(run.stat().st_mtime),
-        "files": files,
-        "chunks": len(list((run / "chunks").glob("*.json"))) if (run / "chunks").exists() else 0,
-        "failed": len(list((run / "failed").iterdir())) if (run / "failed").exists() else 0,
-    }
-
-
-def _is_preview_package(path: Path) -> bool:
-    return any(
-        (path / name).exists()
-        for name in (
-            "live_preview.mp4",
-            "audio_subtitle_player.pyw",
-            "run_audio_subtitle_player.cmd",
-        )
-    )
-
-
-def _latest_preview(base: Path) -> dict[str, Any] | None:
-    if not base.exists():
-        return None
-    candidates = [path for path in base.rglob("*") if path.is_dir() and _is_preview_package(path)]
-    if not candidates:
-        return None
-    run = max(candidates, key=lambda path: path.stat().st_mtime)
-    return _preview_result(run)
-
-
-def _artifact_sets(root: Path) -> list[dict[str, Any]]:
-    transcript_by_run: dict[str, Path] = {}
-    audio_by_run: dict[str, Path] = {}
-    clean_audio_by_run: dict[str, Path] = {}
-    transcript_bases = [root / "outputs" / "media", root / "outputs" / "transcripts"]
-    audio_bases = [root / "outputs" / "media", root / "outputs" / "audio"]
-    for base in transcript_bases:
-        if not base.exists():
-            continue
-        for path in base.rglob("*_transcript.json"):
-            if path.name.endswith("_raw_transcript.json"):
-                continue
-            run_id = _transcript_run_id(path) or path.name.replace("_transcript.json", "")
-            current = transcript_by_run.get(run_id)
-            if not current or path.stat().st_mtime > current.stat().st_mtime:
-                transcript_by_run[run_id] = path
-    for base in audio_bases:
-        if not base.exists():
-            continue
-        for path in base.rglob("*"):
-            if not path.is_file():
-                continue
-            run_id = _run_id_from_audio_path(path)
-            if not run_id:
-                continue
-            if "_clean_16k." in path.name:
-                current = clean_audio_by_run.get(run_id)
-                if not current or path.stat().st_mtime > current.stat().st_mtime:
-                    clean_audio_by_run[run_id] = path
-            elif "_source." in path.name:
-                current = audio_by_run.get(run_id)
-                if not current or path.stat().st_mtime > current.stat().st_mtime:
-                    audio_by_run[run_id] = path
-
-    run_ids: set[str] = set(transcript_by_run)
-    analysis_by_transcript: dict[str, dict[str, Any]] = {}
-    for analysis_dir in [root / "outputs" / "media", root / "outputs" / "analysis"]:
-        if not analysis_dir.exists():
-            continue
-        for run in analysis_dir.rglob("*"):
-            if not run.is_dir() or not (run / "analysis.json").exists():
-                continue
-            transcript_run_id = _analysis_transcript_run_id(run)
-            if transcript_run_id:
-                current = analysis_by_transcript.get(transcript_run_id)
-                item = _latest_analysis_result(run)
-                if item and (not current or item["modified"] > current["modified"]):
-                    analysis_by_transcript[transcript_run_id] = item
-                    run_ids.add(transcript_run_id)
-
-    preview_by_transcript: dict[str, dict[str, Any]] = {}
-    for previews_dir in [root / "outputs" / "media", root / "outputs" / "previews"]:
-        if not previews_dir.exists():
-            continue
-        for run in previews_dir.rglob("*"):
-            if not run.is_dir() or not _is_preview_package(run):
-                continue
-            transcript_run_id = _preview_transcript_run_id(run, analysis_by_transcript)
-            item = _preview_result(run)
-            current = preview_by_transcript.get(transcript_run_id)
-            if transcript_run_id and item and (not current or item["modified"] > current["modified"]):
-                preview_by_transcript[transcript_run_id] = item
-                run_ids.add(transcript_run_id)
-
-    items: list[dict[str, Any]] = []
-    for run_id in sorted(run_ids):
-        transcript = transcript_by_run.get(run_id)
-        source_audio = audio_by_run.get(run_id) or _audio_from_transcript(transcript)
-        clean_audio = clean_audio_by_run.get(run_id) or _clean_audio_from_transcript(transcript)
-        latest_mtime = max(
-            [path.stat().st_mtime for path in [transcript, source_audio, clean_audio] if path and path.exists()]
-            + [0]
-        )
-        analysis = analysis_by_transcript.get(run_id)
-        preview = preview_by_transcript.get(run_id)
-        if analysis:
-            latest_mtime = max(latest_mtime, Path(analysis["path"]).stat().st_mtime)
-        if preview:
-            latest_mtime = max(latest_mtime, Path(preview["path"]).stat().st_mtime)
-        related_paths = [
-            path
-            for path in [
-                transcript,
-                source_audio,
-                clean_audio,
-                Path(analysis["path"]) if analysis else None,
-                Path(preview["path"]) if preview else None,
-            ]
-            if path and path.exists()
-        ]
-        group_dir = _artifact_group_dir(related_paths, root)
-        storage_bytes, storage_file_count = _path_storage(group_dir) if group_dir else _paths_storage(related_paths)
-        items.append(
-            {
-                "run_id": run_id,
-                "label": _artifact_label(transcript, run_id, source_audio),
-                "modified": datetime_from_timestamp(latest_mtime),
-                "transcript": _file_item(transcript) if transcript and transcript.exists() else None,
-                "audio": _file_item(source_audio) if source_audio and source_audio.exists() else None,
-                "clean_audio": _file_item(clean_audio) if clean_audio and clean_audio.exists() else None,
-                "analysis": analysis,
-                "preview": preview,
-                "storage_bytes": storage_bytes,
-                "storage_file_count": storage_file_count,
-                "group_path": str(group_dir) if group_dir else "",
-                "deletable": group_dir is not None,
-            }
-        )
-    items.sort(key=lambda item: item["modified"], reverse=True)
-    return items
-
-
-def _artifact_group_dir(paths: list[Path], root: Path) -> Path | None:
-    """Return one complete media group only when every related path belongs to it."""
-    media_base = (root / "outputs" / "media").resolve()
-    groups: set[Path] = set()
-    for path in paths:
-        try:
-            relative = path.resolve().relative_to(media_base)
-        except (OSError, ValueError):
-            return None
-        if len(relative.parts) < 2:
-            return None
-        groups.add((media_base / relative.parts[0]).resolve())
-    if len(groups) != 1:
-        return None
-    group_dir = next(iter(groups))
-    if group_dir.parent != media_base or not group_dir.is_dir() or group_dir.is_symlink():
-        return None
-    return group_dir
-
-
-def _path_storage(path: Path) -> tuple[int, int]:
-    return _paths_storage([path])
-
-
-def _paths_storage(paths: list[Path]) -> tuple[int, int]:
-    total_bytes = 0
-    file_count = 0
-    seen: set[str] = set()
-    for path in paths:
-        candidates = path.rglob("*") if path.is_dir() else [path]
-        for candidate in candidates:
-            try:
-                if not candidate.is_file():
-                    continue
-                key = os.path.normcase(str(candidate.absolute()))
-                if key in seen:
-                    continue
-                seen.add(key)
-                total_bytes += candidate.stat().st_size
-                file_count += 1
-            except OSError:
-                continue
-    return total_bytes, file_count
+def _require_current_playback(path_text: str) -> None:
+    target = resolve_allowed_path(path_text)
+    if target.suffix.lower() not in {".cmd", ".pyw", ".mp4", ".srt"}:
+        return
+    for item in _artifact_sets(project_root()):
+        preview = item.get("preview") or {}
+        for name, file in preview.get("files", {}).items():
+            audio_entry = preview["files"].get("run_audio_subtitle_player.cmd") or preview["files"].get("audio_subtitle_player.pyw")
+            mode = "audio" if audio_entry and Path(file["path"]).is_relative_to(Path(audio_entry["path"]).parent) else "video"
+            if Path(file["path"]).resolve() == target and preview.get(f"{mode}_stale"):
+                raise HTTPException(status_code=409, detail=preview["stale_reason"])
 
 
 def _delete_artifact_run(run_id: str, root: Path) -> dict[str, Any]:
@@ -739,7 +547,7 @@ def _delete_artifact_run(run_id: str, root: Path) -> dict[str, Any]:
     if not item.get("deletable") or not item.get("group_path"):
         raise HTTPException(status_code=409, detail="该文件组使用旧版跨目录结构，无法安全地从页面整组删除。")
 
-    media_base = (root / "outputs" / "media").resolve()
+    media_base = (output_root(root=root) / "media").resolve()
     target = Path(str(item["group_path"])).resolve()
     if target.parent != media_base or target == media_base or not target.is_dir() or target.is_symlink():
         raise HTTPException(status_code=400, detail="拒绝删除：目标不是有效的媒体文件组目录。")
@@ -757,249 +565,6 @@ def _delete_artifact_run(run_id: str, root: Path) -> dict[str, Any]:
     }
 
 
-
-def _preview_transcript_run_id(run: Path, analysis_by_transcript: dict[str, dict[str, Any]]) -> str:
-    manifest = run / "assets" / "manifest.json"
-    if manifest.exists():
-        try:
-            candidate = str(json.loads(manifest.read_text(encoding="utf-8")).get("transcript_run_id") or "")
-            if candidate in analysis_by_transcript:
-                return candidate
-        except (OSError, ValueError):
-            pass
-    if run.name.endswith("_potplayer"):
-        candidate = run.name.removesuffix("_potplayer")
-        if candidate in analysis_by_transcript:
-            return candidate
-    run_log = run / "run.log"
-    if run_log.exists():
-        try:
-            text = run_log.read_text(encoding="utf-8", errors="replace")
-            match = re.search(r"outputs[\\/]+(?:media[\\/]+[^\\/]+[\\/]+audio|audio)[\\/]+(.+?)_(?:source|clean_16k)\.", text)
-            if match:
-                candidate = match.group(1)
-                if candidate in analysis_by_transcript:
-                    return candidate
-        except Exception:
-            pass
-    zh = run / "live_preview.zh.srt"
-    if zh.exists():
-        try:
-            zh_stat = zh.stat()
-            zh_prefix = zh.read_bytes()[:4096]
-            for transcript_run_id, analysis in analysis_by_transcript.items():
-                translation = Path(analysis.get("files", {}).get("translation_zh.srt", {}).get("path", ""))
-                if translation.exists() and translation.stat().st_size == zh_stat.st_size and translation.read_bytes()[:4096] == zh_prefix:
-                    return transcript_run_id
-        except Exception:
-            pass
-    return ""
-
-
-def _transcript_run_id(path: Path) -> str:
-    try:
-        import json
-
-        meta = json.loads(path.read_text(encoding="utf-8")).get("meta", {})
-        return str(meta.get("run_id") or "").strip()
-    except Exception:
-        return ""
-
-
-def _analysis_transcript_run_id(run: Path) -> str:
-    try:
-        import json
-
-        meta = json.loads((run / "analysis.json").read_text(encoding="utf-8")).get("meta", {})
-        return str(meta.get("transcript_run_id") or "").strip()
-    except Exception:
-        return ""
-
-
-def _audio_from_transcript(transcript: Path | None) -> Path | None:
-    if not transcript or not transcript.exists():
-        return None
-    try:
-        import json
-
-        meta = json.loads(transcript.read_text(encoding="utf-8")).get("meta", {})
-        value = str(meta.get("source_audio_file") or "").strip()
-        if not value:
-            return None
-        path = Path(value)
-        return path if path.exists() and path.is_file() else None
-    except Exception:
-        return None
-
-
-def _clean_audio_from_transcript(transcript: Path | None) -> Path | None:
-    if not transcript or not transcript.exists():
-        return None
-    try:
-        import json
-
-        meta = json.loads(transcript.read_text(encoding="utf-8")).get("meta", {})
-        value = str(meta.get("clean_audio_file") or "").strip()
-        if not value:
-            return None
-        path = Path(value)
-        return path if path.exists() and path.is_file() else None
-    except Exception:
-        return None
-
-
-def _artifact_label(transcript: Path | None, fallback: str, source_audio: Path | None = None) -> str:
-    candidates: list[str] = []
-    if source_audio:
-        candidates.append(source_audio.name)
-    if transcript and transcript.exists():
-        try:
-            import json
-
-            meta = json.loads(transcript.read_text(encoding="utf-8")).get("meta", {})
-            candidates.extend(
-                str(value or "").strip()
-                for value in [meta.get("title"), meta.get("input_file"), meta.get("source_audio_file")]
-            )
-        except Exception:
-            pass
-    for value in candidates:
-        label = _clean_artifact_name(value, fallback)
-        if label:
-            return label
-    return _format_run_label(fallback)
-
-
-def _clean_artifact_name(value: str, fallback: str) -> str:
-    if not value:
-        return ""
-    name = Path(value).name
-    for suffix in ["_source.m4a", "_source.webm", "_source.mp3", "_source.wav", "_clean_16k.wav", "_transcript.json"]:
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-    name = re.sub(r"_[0-9a-z]{4}$", "", name)
-    mojibake_markers = ["�", "ï", "ã", "ð", "Â", "Õ"]
-    if sum(1 for marker in mojibake_markers if marker in name) >= 1:
-        return ""
-    if any(0x80 <= ord(ch) <= 0x9F for ch in name):
-        return ""
-    if not name:
-        return ""
-    if (name == fallback or name.startswith(fallback)) and _looks_generated_run_id(fallback):
-        return ""
-    return name[:96]
-
-
-def _looks_generated_run_id(value: str) -> bool:
-    return bool(re.match(r"^\d{8}_\d{6}_\d{3}_[0-9a-z]{4}$", value or ""))
-
-
-def _format_run_label(run_id: str) -> str:
-    parts = run_id.split("_")
-    if len(parts) >= 2 and len(parts[0]) == 8 and len(parts[1]) == 6:
-        date = f"{parts[0][4:6]}-{parts[0][6:8]}"
-        time = f"{parts[1][0:2]}:{parts[1][2:4]}"
-        return f"文件组 {date} {time}"
-    return run_id
-
-
-def _latest_analysis_result(run: Path) -> dict[str, Any] | None:
-    required = ["analysis.json", "bilingual.md", "translation_zh.srt", "review.md"]
-    if not all((run / name).exists() for name in required):
-        return None
-    files = {name: _file_item(run / name) for name in required}
-    for name in ("vocabulary.md", "grammar.md"):
-        if (run / name).exists():
-            files[name] = _file_item(run / name)
-    if (run / "study_notes.md").exists():
-        files["study_notes.md"] = _file_item(run / "study_notes.md")
-    if (run / "video_summary.md").exists():
-        files["video_summary.md"] = _file_item(run / "video_summary.md")
-    if (run / "character_profile.md").exists():
-        files["character_profile.md"] = _file_item(run / "character_profile.md")
-    return {
-        "name": run.name,
-        "path": str(run.resolve()),
-        "modified": datetime_from_timestamp(run.stat().st_mtime),
-        "files": files,
-        "chunks": len(list((run / "chunks").glob("*.json"))) if (run / "chunks").exists() else 0,
-        "failed": len(list((run / "failed").iterdir())) if (run / "failed").exists() else 0,
-    }
-
-
-def _preview_result(run: Path) -> dict[str, Any] | None:
-    if not _is_preview_package(run):
-        return None
-    video_mode = (run / "live_preview.mp4").exists()
-    audio_dir = run if (run / "audio_subtitle_player.pyw").exists() or (run / "run_audio_subtitle_player.cmd").exists() else run.parent / "audio"
-    names = [
-        "live_preview.mp4",
-        "display.bilingual.srt",
-        "live_preview.study.srt",
-        "live_preview.bilingual.srt",
-        "live_preview.srt",
-        "live_preview.zh.srt",
-        "live_preview.ja.srt",
-        "floating_subtitle_overlay.pyw",
-        "run_floating_subtitle_overlay.cmd",
-        "audio_subtitle_player.pyw",
-        "run_audio_subtitle_player.cmd",
-        "audio_mode.bilingual.srt",
-        "vocabulary.md",
-        "grammar.md",
-        "cover.jpg",
-        "README_play.txt",
-        "run.log",
-    ]
-    files = {name: _file_item(path) for name in names
-             if (path := _first_existing(run, [name, "subtitles/" + name, "assets/" + name]))}
-    for name in (
-        "audio_subtitle_player.pyw",
-        "run_audio_subtitle_player.cmd",
-        "audio_mode.bilingual.srt",
-        "README_play.txt",
-    ):
-        path = audio_dir / name
-        if path.exists():
-            files[name] = _file_item(path)
-    if not video_mode:
-        files.pop("README_play.txt", None)
-        readme = audio_dir / "README_play.txt"
-        if readme.exists():
-            files["README_play.txt"] = _file_item(readme)
-    return {
-        "name": run.name,
-        "path": str(run.resolve()),
-        "modified": datetime_from_timestamp(run.stat().st_mtime),
-        "files": files,
-    }
-
-
-def _first_existing(base: Path, names: list[str]) -> Path | None:
-    for name in names:
-        path = base / name
-        if path.exists():
-            return path
-    return None
-
-
-def _file_item(path: Path) -> dict[str, Any]:
-    stat = path.stat()
-    return {
-        "name": path.name,
-        "path": str(path.resolve()),
-        "size": stat.st_size,
-        "modified": datetime_from_timestamp(stat.st_mtime),
-        "is_dir": path.is_dir(),
-    }
-
-
-def datetime_from_timestamp(value: float) -> str:
-    from datetime import datetime
-
-    return datetime.fromtimestamp(value).isoformat(timespec="seconds")
-
-
 def is_port_available(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.5)
@@ -1008,13 +573,3 @@ def is_port_available(host: str, port: int) -> bool:
             return True
         except OSError:
             return False
-
-
-
-
-
-
-
-
-
-

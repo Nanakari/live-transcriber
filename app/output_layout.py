@@ -7,15 +7,15 @@ MEDIA_ROOT_NAME = "media"
 
 
 def safe_name(value: str, *, max_len: int = 120) -> str:
-    text = re.sub(r'[\\/:*?"<>|]+', " ", value or "")
+    text = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]+', " ", value or "")
     text = re.sub(r"\s+", " ", text).strip(" ._")
     return text[:max_len].strip(" ._")
 
 
 def media_root(base_output_dir: Path | None = None) -> Path:
-    from .config import project_root
+    from .config import output_root
 
-    base = base_output_dir or (project_root() / "outputs")
+    base = output_root(base_output_dir)
     return base / MEDIA_ROOT_NAME
 
 
@@ -44,13 +44,19 @@ def ensure_media_subdirs(group_dir: Path) -> dict[str, Path]:
 
 def write_media_index(group_dir: Path) -> None:
     """Give each task a concise entry point without moving historical files."""
+    from .preview_state import preview_is_current
+
+    analyses = sorted((group_dir / "analysis").glob("*/analysis.json"), key=lambda path: path.stat().st_mtime_ns)
+    subtitle = analyses[-1].parent / "translation_zh.srt" if analyses else None
+    audio_current = subtitle is None or preview_is_current(group_dir / "audio", subtitle)
+    video_current = subtitle is None or preview_is_current(group_dir / "video", subtitle)
     lines = ["# 媒体任务", "", "## 阅读与播放", ""]
     videos = list(group_dir.glob("video/live_preview.mp4")) or list(group_dir.glob("previews/*/live_preview.mp4"))
-    if videos:
+    if videos and (subtitle is None or preview_is_current(videos[0].parent, subtitle)):
         lines.append(f"- [播放字幕视频]({videos[0].relative_to(group_dir).as_posix()})（任意 MP4 播放器）")
     floating_overlay = group_dir / "video" / "floating_subtitle_overlay.pyw"
     floating_launcher = group_dir / "video" / "run_floating_subtitle_overlay.cmd"
-    if floating_overlay.exists():
+    if floating_overlay.exists() and video_current:
         floating_entry = floating_launcher if floating_launcher.exists() else floating_overlay
         lines.append(
             f"- [悬挂字幕框（直接启动）](<{floating_entry.relative_to(group_dir).as_posix()}>)"
@@ -59,19 +65,22 @@ def write_media_index(group_dir: Path) -> None:
     audio_player = group_dir / "audio" / "audio_subtitle_player.pyw"
     audio_launcher = group_dir / "audio" / "run_audio_subtitle_player.cmd"
     audio_subtitle = group_dir / "audio" / "audio_mode.bilingual.srt"
-    if audio_player.exists():
+    if audio_player.exists() and audio_current:
         audio_entry = audio_launcher if audio_launcher.exists() else audio_player
         lines.append(
             f"- [音频 + 悬挂字幕（直接启动）](<{audio_entry.relative_to(group_dir).as_posix()}>)"
             "（只播放音频，底部独立字幕框，不打开视频画面）"
         )
-    if audio_subtitle.exists():
+    if audio_subtitle.exists() and audio_current:
         lines.append(
             f"- [音频模式双语字幕](<{audio_subtitle.relative_to(group_dir).as_posix()}>)"
         )
     for transcript in sorted((group_dir / "transcripts").glob("*_transcript.md")):
         lines.append(f"- [原文转写](<{transcript.relative_to(group_dir).as_posix()}>)")
-    analyses = sorted((group_dir / "analysis").glob("*/analysis.json"), key=lambda path: path.stat().st_mtime)
+    if audio_player.exists() and not audio_current:
+        lines.extend(["- 音频播放器的字幕已过期或生成未完成，请使用最新分析重新生成。", ""])
+    if videos and subtitle is not None and not preview_is_current(videos[0].parent, subtitle):
+        lines.extend(["- 字幕视频已过期或生成未完成，请使用最新分析重新生成。", ""])
     if analyses:
         repaired_transcript = analyses[-1].parent / "repaired_transcript.srt"
         if repaired_transcript.exists():

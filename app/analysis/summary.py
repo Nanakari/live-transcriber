@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from .gemini_client import LLMClient, parse_json_text
+from .gemini_client import LLMClient, PermanentAnalysisError, parse_json_text
 from .prompts import video_summary_output_schema
 from .schemas import AnalysisDocument, VideoSummary
 from app.utils import RunLogger
@@ -58,6 +58,8 @@ def generate_video_summary(
         except Exception as exc:
             # Transport retries are already handled by the client.
             document.video_summary_error = str(exc)
+            if isinstance(exc, PermanentAnalysisError):
+                document.analysis_error = str(exc)
             break
         try:
             result = VideoSummary.model_validate(parse_json_text(raw))

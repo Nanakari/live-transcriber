@@ -34,6 +34,10 @@ class _GeminiRequestFailure(Exception):
         self.model_unavailable = model_unavailable
 
 
+class PermanentAnalysisError(AppError):
+    """A request/configuration error that retrying other chunks cannot fix."""
+
+
 @dataclass
 class GeminiClient:
     model: str
@@ -57,6 +61,7 @@ class GeminiClient:
         self.model = self.model.strip()
         self.fallback_model = self.fallback_model.strip()
         self._active_model = self.model
+        self._permanent_error: PermanentAnalysisError | None = None
 
     def generate_json_text(
         self,
@@ -65,6 +70,8 @@ class GeminiClient:
         system_prompt: str,
         output_schema: dict[str, Any] | None = None,
     ) -> str:
+        if self._permanent_error is not None:
+            raise self._permanent_error
         models = [self._active_model]
         if (
             self._active_model == self.model
@@ -96,6 +103,9 @@ class GeminiClient:
                 break
 
         message = str(last_failure) if last_failure is not None else "未知错误"
+        if last_failure is not None and _is_permanent_status(last_failure.status_code):
+            self._permanent_error = PermanentAnalysisError(f"Gemini 请求无法继续，请检查密钥、权限和模型配置：{message}")
+            raise self._permanent_error
         raise AppError(f"Gemini 请求最终失败：{message}")
 
     def activate_fallback(self, reason: str) -> bool:
@@ -134,6 +144,8 @@ class GeminiClient:
         last_status_code: int | None = None
         model_unavailable = False
         for attempt in range(self.max_retries + 1):
+            last_status_code = None
+            model_unavailable = False
             try:
                 self.logger.write(f"Gemini request start model={model} attempt={attempt + 1}")
                 response = requests.post(url, params=params, json=payload, timeout=self.request_timeout_seconds)
@@ -141,7 +153,7 @@ class GeminiClient:
                     last_status_code = response.status_code
                     last_error = self._redact(f"HTTP {response.status_code}: {response.text[:1000]}")
                     model_unavailable = _is_model_unavailable(response.status_code, response.text)
-                    if model_unavailable or (can_fallback and response.status_code == 429):
+                    if _is_permanent_status(response.status_code) or (can_fallback and response.status_code == 429):
                         raise _GeminiRequestFailure(
                             last_error,
                             status_code=response.status_code,
@@ -422,6 +434,10 @@ def _is_model_unavailable(status_code: int, response_text: str) -> bool:
         marker in lowered
         for marker in ("not found", "not supported", "unsupported", "not available")
     )
+
+
+def _is_permanent_status(status_code: int | None) -> bool:
+    return status_code is not None and 400 <= status_code < 500 and status_code not in {408, 429}
 
 
 def _should_switch_model(failure: _GeminiRequestFailure) -> bool:

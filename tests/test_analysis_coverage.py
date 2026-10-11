@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import app.analysis.analyzer as analyzer_module
+import app.analysis.cache as cache_module
 
 from app.analysis.analyzer import (
     AnalyzeOptions,
@@ -115,9 +118,9 @@ def _options(tmp_path: Path) -> AnalyzeOptions:
 def _line(segment_id: int, translation: str) -> dict:
     return {
         "segment_id": segment_id,
-        "start": 99,
-        "end": 100,
-        "original": "模型改写的原文",
+        "start": segment_id - 1,
+        "end": segment_id,
+        "original": f"原文{segment_id}",
         "translation_zh": translation,
     }
 
@@ -233,7 +236,7 @@ def test_repeated_omissions_fall_back_to_original_without_timeline_gap(tmp_path:
 
 
 def test_incomplete_cached_result_is_detected() -> None:
-    client = FakeClient([{"bilingual_lines": [_line(1, "译文1")] }])
+    client = FakeClient([{"bilingual_lines": [{**_line(1, "译文1"), "original": "错误原文"}]}])
     chunk = _chunk()
     parsed = json.loads(client.generate_json_text("", system_prompt=""))
     from app.analysis.schemas import ChunkAnalysisResult
@@ -249,6 +252,83 @@ def test_incomplete_cached_result_is_detected() -> None:
 
     assert any("缺少 segment_id=[2, 3]" in issue for issue in issues)
     assert any("时间或原文未对齐" in issue for issue in issues)
+
+
+@pytest.mark.parametrize("mismatch", [
+    {"original": "原文2"},
+    {"start": 99},
+    {"end": 100},
+    {"start": float("nan")},
+    {"end": float("inf")},
+])
+def test_fresh_alignment_mismatch_retries_only_affected_row(tmp_path: Path, mismatch) -> None:
+    client = FakeClient([
+        {"bilingual_lines": [
+            {**_line(1, "错误译文"), **mismatch}, _line(2, "已有译文2"), _line(3, "已有译文3"),
+        ]},
+        {"bilingual_lines": [_line(1, "正确译文1")]},
+    ])
+
+    result = _process_chunk(client, _chunk(), _options(tmp_path), "ja",
+                            RunLogger(tmp_path / "run.log", mirror_stdout=False))
+
+    assert client.calls == 2
+    assert "原文1" in client.prompts[1]
+    assert "原文2" not in client.prompts[1]
+    assert [line.translation_zh for line in result.bilingual_lines] == ["正确译文1", "已有译文2", "已有译文3"]
+    assert _chunk_coverage_issues(result, _chunk()) == []
+
+
+def test_misaligned_supplement_stays_missing_without_overwriting_good_rows(tmp_path: Path) -> None:
+    client = FakeClient([
+        {"bilingual_lines": [_line(1, "已有译文1"), _line(3, "已有译文3")]},
+        {"bilingual_lines": [
+            _line(1, "不应替换已有译文"),
+            {**_line(2, "错位补译"), "original": "原文3"},
+        ]},
+    ])
+
+    result = _process_chunk(client, _chunk(), _options(tmp_path), "ja",
+                            RunLogger(tmp_path / "run.log", mirror_stdout=False))
+
+    assert client.calls == 3
+    assert [line.translation_zh for line in result.bilingual_lines] == [
+        "已有译文1", "[翻译暂缺] 原文2", "已有译文3",
+    ]
+    assert result.bilingual_lines[1].translation_status == TRANSLATION_STATUS_MISSING
+    assert _result_has_fallback(result)
+
+
+def test_response_without_redundant_source_fields_is_accepted(tmp_path: Path) -> None:
+    client = FakeClient([{"bilingual_lines": [
+        {"segment_id": index, "translation_zh": f"译文{index}"} for index in range(1, 4)
+    ]}])
+
+    result = _process_chunk(client, _chunk(), _options(tmp_path), "ja",
+                            RunLogger(tmp_path / "run.log", mirror_stdout=False))
+
+    assert client.calls == 1
+    assert _chunk_coverage_issues(result, _chunk()) == []
+    assert not _result_has_fallback(result)
+
+
+def test_misaligned_review_cannot_attach_an_auto_repair_to_another_source(tmp_path: Path) -> None:
+    client = FakeClient([
+        {"bilingual_lines": [_line(index, f"译文{index}") for index in range(1, 4)],
+         "review_items": [{
+             "segment_id": 1, "original": "原文2", "corrected_original": "错误修复",
+             "repair_confidence": 0.99, "reason_zh": "ASR 错字", "risk_type": "ASR",
+         }]},
+        {"bilingual_lines": [_line(1, "重新核对的译文")]},
+    ])
+
+    result = _process_chunk(client, _chunk(), _options(tmp_path), "ja",
+                            RunLogger(tmp_path / "run.log", mirror_stdout=False))
+
+    assert client.calls == 2
+    assert result.bilingual_lines[0].translation_zh == "重新核对的译文"
+    assert result.bilingual_lines[0].corrected_original == ""
+    assert not result.review_items
 
 
 def test_legacy_and_malformed_translation_statuses_are_safe() -> None:
@@ -452,6 +532,71 @@ def _resume_document() -> TranscriptDocument:
             for index in range(1, 4)
         ],
     )
+
+
+def test_resume_ignores_v2_cache_and_reuses_new_validated_cache(tmp_path: Path, monkeypatch) -> None:
+    options = _options(tmp_path)
+    options.resume = True
+    options.summary = False
+    options.study_notes = False
+    chunk = _chunk()
+    # Version 2 already rewrote source/timestamps before saving. Its incorrect
+    # translations can look structurally aligned and cannot be repaired in place.
+    with monkeypatch.context() as old_version:
+        old_version.setattr(cache_module, "CACHE_KEY_VERSION", 2)
+        old_key = _cache_key_for_test(options, chunk)
+    old_path = chunk_result_path(tmp_path / "outputs" / "cache" / "analysis", chunk, old_key)
+    save_chunk_result(old_path, ChunkAnalysisResult(
+        chunk_id=chunk.chunk_id, start=chunk.start, end=chunk.end,
+        bilingual_lines=[_line(index, "旧缓存中的错译") for index in range(1, 4)],
+    ))
+    client = FakeClient([{"bilingual_lines": [_line(index, f"新译文{index}") for index in range(1, 4)]}])
+    monkeypatch.setenv("LIVE_TRANSCRIBER_HOME", str(tmp_path))
+    monkeypatch.setattr(analyzer_module, "load_transcript", lambda _path: _resume_document())
+    monkeypatch.setattr(analyzer_module, "_make_client", lambda *_args: client)
+
+    first = run_analysis(options)
+    second = run_analysis(options)
+
+    assert client.calls == 1
+    assert first["document"].meta.skipped_chunks == 0
+    assert second["document"].meta.skipped_chunks == 1
+    assert [line.translation_zh for line in second["document"].chunks[0].bilingual_lines] == ["新译文1", "新译文2", "新译文3"]
+    assert old_path.is_file()  # Invalidation must not delete the user's prior results.
+
+
+def test_swapped_response_is_partial_until_resume_recovers_it(tmp_path: Path, monkeypatch) -> None:
+    options = _options(tmp_path)
+    options.resume = True
+    options.summary = False
+    options.study_notes = False
+    swapped = FakeClient([{"bilingual_lines": [
+        {**_line(1, "错译一"), "original": "原文2", "start": 1, "end": 2},
+        {**_line(2, "错译二"), "original": "原文1", "start": 0, "end": 1},
+        _line(3, "保留译文3"),
+    ]}])
+    monkeypatch.setenv("LIVE_TRANSCRIBER_HOME", str(tmp_path))
+    monkeypatch.setattr(analyzer_module, "load_transcript", lambda _path: _resume_document())
+    monkeypatch.setattr(analyzer_module, "_make_client", lambda *_args: swapped)
+
+    first = run_analysis(options)
+
+    assert first["document"].meta.quality_status == "partial"
+    assert first["document"].meta.fallback_lines == 2
+    cache_files = list((tmp_path / "outputs" / "cache" / "analysis").glob("chunk_*.json"))
+    assert len(cache_files) == 1
+    assert "错译" not in cache_files[0].read_text(encoding="utf-8")
+
+    recovery = FakeClient([{"bilingual_lines": [_line(1, "补译1"), _line(2, "补译2")]}])
+    monkeypatch.setattr(analyzer_module, "_make_client", lambda *_args: recovery)
+    second = run_analysis(options)
+
+    assert recovery.calls == 1
+    assert "原文3" not in recovery.prompts[0]
+    assert second["document"].meta.quality_status == "complete"
+    assert [line.translation_zh for line in second["document"].chunks[0].bilingual_lines] == [
+        "补译1", "补译2", "保留译文3",
+    ]
 
 
 def test_run_analysis_resume_uses_shared_partial_cache_for_coverage_only(tmp_path: Path, monkeypatch) -> None:

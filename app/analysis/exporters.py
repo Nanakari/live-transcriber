@@ -214,6 +214,9 @@ def _expression_lines(items: list[FixedExpressionItem]) -> list[str]:
 
 def _review_lines(document: AnalysisDocument) -> list[str]:
     lines: list[str] = []
+    if document.analysis_error:
+        lines.extend([f"> 分析请求已停止：{document.analysis_error}",
+                      "> 已保留成功结果；修正配置后使用 --resume 恢复。", ""])
     for chunk_id, item in _collect_review_items(document):
         time_text = ""
         if item.start is not None and item.end is not None:

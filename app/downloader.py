@@ -13,6 +13,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .config import project_root, tool_path
 from .media_assets import default_thumbnail_path
+from .output_layout import safe_name
 from .utils import AppError, RunLogger, run_subprocess
 
 
@@ -86,9 +87,34 @@ def _add_ffmpeg_location(command: list[str]) -> None:
 
 
 def _safe_filename_part(value: str, *, max_len: int = 56) -> str:
-    value = re.sub(r'[\/:*?"<>|]+', " ", value)
-    value = re.sub(r"\s+", " ", value).strip(" ._")
-    return value[:max_len].strip(" ._") if value else ""
+    return safe_name(value, max_len=max_len)
+
+
+def _checked_output_path(directory: Path, filename: str) -> Path:
+    """Keep every downloaded artifact a direct child, including on Windows."""
+    if not filename or re.search(r'[\\/:*?"<>|\x00-\x1f\x7f]', filename):
+        raise AppError("拒绝下载：输出文件名包含非法路径字符。")
+    target = directory / filename
+    if target.resolve().parent != directory.resolve():
+        raise AppError("拒绝下载：输出路径超出指定目录。")
+    return target
+
+
+def _output_template(directory: Path, stem: str) -> str:
+    # Escape literal percent signs in both the name and its ancestors. Only
+    # the extension is a yt-dlp template field, never remote title content.
+    literal = _checked_output_path(directory, stem + ".m4a").with_suffix("")
+    return str(literal).replace("%", "%%") + ".%(ext)s"
+
+
+def _downloaded_files(directory: Path, stem: str, extensions: set[str]) -> list[Path]:
+    # Do not interpret titles as glob patterns (for example, "Lesson [01]").
+    return sorted(
+        _checked_output_path(directory, path.name)
+        for path in directory.iterdir()
+        if path.stem == stem and path.suffix.lower() in extensions
+        and path.is_file() and path.stat().st_size > 0
+    )
 
 
 def _compact_date(value: str) -> str:
@@ -508,8 +534,8 @@ def download_audio(
     if section:
         logger.write(f"download section={section.start}-{section.end or 'end'}")
     output_stem = _build_media_stem(info, run_id)
+    section_output = _checked_output_path(audio_dir, f"{output_stem}_source.m4a")
     if section:
-        section_output = audio_dir / f"{output_stem}_source.m4a"
         _download_audio_section_with_ffmpeg(
             yt_dlp,
             download_url,
@@ -523,7 +549,7 @@ def download_audio(
         )
         return section_output, title
 
-    output_template = str(audio_dir / f"{output_stem}_source.%(ext)s")
+    output_template = _output_template(audio_dir, f"{output_stem}_source")
     command = [
         *yt_dlp,
         "-f",
@@ -582,13 +608,7 @@ def download_audio(
             f"yt-dlp 输出：{output}"
         )
 
-    candidates = sorted(
-        path
-        for path in audio_dir.glob(f"{output_stem}_source.*")
-        if path.is_file()
-        and path.stat().st_size > 0
-        and not path.name.endswith((".part", ".ytdl"))
-    )
+    candidates = _downloaded_files(audio_dir, f"{output_stem}_source", {".m4a"})
     if not candidates:
         raise AppError("yt-dlp 运行结束，但没有找到下载后的音频文件。请检查 yt-dlp 输出和写入权限。")
     return candidates[0], title
@@ -613,7 +633,7 @@ def download_thumbnail(
         if not source.exists() or not source.is_file() or source.stat().st_size == 0:
             logger.write(f"default thumbnail unavailable after {reason}: {source}")
             return None
-        target = thumbnails_dir / f"{run_id}.png"
+        target = _checked_output_path(thumbnails_dir, f"{run_id}.png")
         shutil.copy2(source, target)
         logger.write(f"using default thumbnail after {reason}: {target}")
         return target
@@ -621,7 +641,7 @@ def download_thumbnail(
     yt_dlp = _yt_dlp_command()
     if not yt_dlp:
         return use_default("yt-dlp was not found")
-    output_template = str(thumbnails_dir / f"{run_id}.%(ext)s")
+    output_template = _output_template(thumbnails_dir, run_id)
     command = [
         *yt_dlp,
         "--skip-download",
@@ -641,10 +661,7 @@ def download_thumbnail(
     if result.returncode != 0:
         logger.write("thumbnail download failed: " + (result.stderr or result.stdout))
         return use_default("thumbnail download failed")
-    candidates = sorted(
-        path for path in thumbnails_dir.glob(f"{run_id}.*")
-        if path.is_file() and path.stat().st_size > 0
-    )
+    candidates = _downloaded_files(thumbnails_dir, run_id, {".jpg", ".jpeg", ".png", ".webp"})
     return candidates[0] if candidates else use_default("thumbnail was missing")
 
 

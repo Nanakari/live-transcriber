@@ -11,7 +11,7 @@ except ImportError:
 
 from fastapi import HTTPException
 
-from ..config import project_root
+from ..config import output_root, project_root
 from ..utils import hidden_process_flags
 
 
@@ -38,8 +38,8 @@ def resolve_allowed_path(path_text: str, *, must_be_text: bool = False) -> Path:
         target = root / target
     target = target.resolve()
 
-    if not _is_relative_to(target, root):
-        raise HTTPException(status_code=403, detail="path is outside the project directory")
+    if not any(_is_relative_to(target, base) for base in (root, output_root(root=root))):
+        raise HTTPException(status_code=403, detail="path is outside the project and configured output directories")
     if must_be_text and target.suffix.lower() not in TEXT_EXTENSIONS:
         raise HTTPException(status_code=403, detail="file type is not allowed for preview")
     return target

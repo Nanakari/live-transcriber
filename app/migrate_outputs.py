@@ -5,50 +5,50 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .config import project_root
-from .output_layout import ensure_media_subdirs, group_name_from_stem, media_group_dir
-from .web.routes import _artifact_sets
+from .config import output_root, project_root
+from .output_layout import media_subdirs, group_name_from_stem, media_group_dir
+from .artifact_catalog import artifact_sets
 
 
 def migrate_legacy_outputs(root: Path | None = None) -> dict[str, Any]:
     root = root or project_root()
-    outputs = root / "outputs"
+    outputs = output_root(root=root)
     moved: list[dict[str, str]] = []
     skipped: list[str] = []
 
     transcript_candidates = list((outputs / "transcripts").glob("*_transcript.json"))
-    for item in _artifact_sets(root):
+    for item in artifact_sets(root):
         label = str(item.get("label") or item.get("run_id") or "untitled_media")
         run_id = str(item.get("run_id") or "")
         group = media_group_dir(label, outputs)
-        subdirs = ensure_media_subdirs(group)
+        subdirs = media_subdirs(group)
 
         for key in ("audio", "clean_audio"):
             path = _path_from_item(item.get(key))
             if path:
-                _move(path, subdirs["audio"], moved, skipped)
+                _move(path, subdirs["audio"], moved, skipped, outputs)
 
         related_prefixes = _related_prefixes(item, run_id)
         for audio in _matching_audio(outputs / "audio", related_prefixes):
-            _move(audio, subdirs["audio"], moved, skipped)
+            _move(audio, subdirs["audio"], moved, skipped, outputs)
 
         for transcript in _matching_transcripts(transcript_candidates, run_id, related_prefixes):
-            _move(transcript, subdirs["transcripts"], moved, skipped)
+            _move(transcript, subdirs["transcripts"], moved, skipped, outputs)
         for transcript_sidecar in _matching_transcript_sidecars(outputs / "transcripts", related_prefixes):
-            _move(transcript_sidecar, subdirs["transcripts"], moved, skipped)
+            _move(transcript_sidecar, subdirs["transcripts"], moved, skipped, outputs)
 
         analysis = _path_from_item(item.get("analysis"))
         if analysis:
-            _move(analysis, subdirs["analysis"], moved, skipped)
+            _move(analysis, subdirs["analysis"], moved, skipped, outputs)
 
         preview = _path_from_item(item.get("preview"))
         if preview:
-            _move(preview, subdirs["previews"], moved, skipped)
+            _move(preview, subdirs["previews"], moved, skipped, outputs)
 
     for audio in _orphan_audio(outputs / "audio"):
         group = media_group_dir(group_name_from_stem(audio.stem), outputs)
-        subdirs = ensure_media_subdirs(group)
-        _move(audio, subdirs["audio"], moved, skipped)
+        subdirs = media_subdirs(group)
+        _move(audio, subdirs["audio"], moved, skipped, outputs)
 
     return {"moved": moved, "skipped": skipped}
 
@@ -120,10 +120,21 @@ def _matching_transcript_sidecars(transcript_dir: Path, prefixes: set[str]) -> l
     return matches
 
 
-def _move(path: Path, target_dir: Path, moved: list[dict[str, str]], skipped: list[str]) -> None:
-    if _is_in_media(path):
+def _move(path: Path, target_dir: Path, moved: list[dict[str, str]], skipped: list[str], outputs: Path) -> None:
+    # Metadata may reference the user's original recording outside outputs.
+    # Only relocate files from this root's known legacy directories; organized
+    # media groups are already final, even when an explicit root was supplied.
+    try:
+        relative = path.resolve().relative_to(outputs.resolve())
+    except ValueError:
+        relative = Path()
+    if not path.exists() or path.is_symlink() or len(relative.parts) < 2 or relative.parts[0] not in {
+        "audio", "transcripts", "analysis", "previews", "thumbnails",
+    }:
         skipped.append(str(path))
         return
+    # Do not let a link at media/ redirect a recursive move outside outputs.
+    target_dir.resolve().relative_to(outputs.resolve() / "media")
     target_dir.mkdir(parents=True, exist_ok=True)
     target = _unique_target(target_dir / path.name)
     shutil.move(str(path), str(target))
@@ -140,14 +151,6 @@ def _unique_target(target: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise RuntimeError(f"Too many duplicate paths for {target}")
-
-
-def _is_in_media(path: Path) -> bool:
-    try:
-        path.resolve().relative_to((project_root() / "outputs" / "media").resolve())
-        return True
-    except ValueError:
-        return False
 
 
 if __name__ == "__main__":

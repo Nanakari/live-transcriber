@@ -9,11 +9,13 @@ if not (stage / 'tools' / 'ffmpeg.exe').exists():
     raise RuntimeError('Run scripts/release_assets.py before building.')
 runtime = []
 for name in ('expat.dll', 'libexpat.dll', 'libssl-3-x64.dll', 'libcrypto-3-x64.dll',
-             'ffi.dll', 'sqlite3.dll', 'libbz2.dll', 'liblzma.dll', 'zlib.dll'):
+             'ffi.dll', 'sqlite3.dll', 'libbz2.dll', 'liblzma.dll', 'zlib.dll',
+             'tcl86t.dll', 'tk86t.dll'):
     path = Path(sys.base_prefix) / 'Library' / 'bin' / name
     if path.exists():
         runtime.append((str(path), '.'))
 datas = [
+    (str(root / 'app/defaults.yaml'), 'app'),
     (str(root / 'app/web/templates/workbench.html'), 'app/web/templates'),
     (str(root / 'app/web/static/workbench.css'), 'app/web/static'),
     (str(root / 'app/web/static/workbench.js'), 'app/web/static'),

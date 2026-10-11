@@ -1,4 +1,6 @@
-﻿app:
+# Shared defaults for source and packaged runs. Put personal overrides in
+# <data directory>/config.local.yaml; do not edit this bundled resource.
+app:
   output_dir: "outputs"
   timezone: "Asia/Tokyo"
 
@@ -65,6 +67,7 @@ analysis:
   model: "gemini-3.5-flash-lite"
   fallback_model: "gemini-3.1-flash-lite"
   api_key_env: "GEMINI_API_KEY"
+  local_command: "codex"
   # This model is used only by the Skill-internal local Codex route.
   local_model: "gpt-5.6-luna"
   local_timeout_seconds: 360
@@ -90,9 +93,6 @@ analysis:
     - "json"
     - "markdown"
     - "srt"
-
-
-
 
 features:
   summary: true

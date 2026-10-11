@@ -1,6 +1,7 @@
 """Verify a folder release without developer PATH, Python, credentials or models."""
 from __future__ import annotations
 import json
+from http.client import HTTPConnection, HTTPException
 import os
 from pathlib import Path
 import socket
@@ -8,7 +9,14 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.request import urlopen
+
+
+def get_response(connection: HTTPConnection, path: str) -> tuple[bytes, str]:
+    """Read each response completely before reusing the browser-like connection."""
+    connection.request("GET", path)
+    with connection.getresponse() as response:
+        assert response.status == 200, f"{path}: HTTP {response.status}"
+        return response.read(), response.getheader("Content-Type", "").split(";", 1)[0]
 
 
 def main() -> None:
@@ -22,6 +30,8 @@ def main() -> None:
                    CUDA_VISIBLE_DEVICES="", HF_HUB_OFFLINE="1")
         for arguments in ([str(executable), "--help"], [str(executable), "_yt-dlp", "--version"],
                           [str(release / "_internal" / "tools" / "ffmpeg.exe"), "-version"],
+                          [str(release / "_internal" / "tools" / "ffplay.exe"), "-version"],
+                          [str(release / "_internal" / "tools" / "ffprobe.exe"), "-version"],
                           [str(release / "_internal" / "tools" / "node.exe"), "--version"]):
             subprocess.run(arguments, env=env, cwd=directory, check=True, capture_output=True, timeout=60, creationflags=flags)
         media = Path(directory) / "字幕 sample's"
@@ -64,29 +74,46 @@ def main() -> None:
         with (Path(directory) / "server.log").open("w", encoding="utf-8") as log:
             process = subprocess.Popen([str(executable), "web", "--port", str(port), "--no-browser"],
                                        cwd=directory, env=env, stdout=log, stderr=log, creationflags=flags)
+            checking_path = "/api/status"
+            # Connection: close intermittently reset before the body was read
+            # on Windows, also in a control run against Python's HTTPServer.
+            # One persistent connection still validates every response in full.
+            connection = HTTPConnection("127.0.0.1", port, timeout=10)
             try:
                 deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
                     if process.poll() is not None:
                         raise RuntimeError((Path(directory) / "server.log").read_text(encoding="utf-8"))
                     try:
-                        with urlopen(f"http://127.0.0.1:{port}/api/status", timeout=5) as response:
-                            status = json.load(response)
+                        body, _ = get_response(connection, "/api/status")
+                        status = json.loads(body)
                         break
-                    except OSError:
+                    except (OSError, HTTPException):
+                        connection.close()
                         time.sleep(0.5)
                 else:
                     raise RuntimeError("Packaged server did not become ready.")
-                assert status["ffmpeg"] and status["yt_dlp"] and status["faster_whisper"], status
+                assert all(status[key] for key in ("ffmpeg", "ffplay", "ffprobe", "yt_dlp", "faster_whisper")), status
                 assert not status["gemini_api_key_detected"], "Release picked up a developer credential"
                 assert status["defaults"]["proxy"] == ""
                 assert status["defaults"]["quality"] == "high"
                 for path, marker in (("/", "workbench.js"), ("/?view=classic", "classic.js"), ("/static/classic.js", "renderQuickAction"), ("/static/classic.css", ".shell"), ("/static/workbench.js", "startTask"), ("/static/workbench.css", ".shell")):
-                    with urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as response:
-                        if path.endswith(".js"):
-                            assert response.headers.get_content_type() == "application/javascript"
-                        assert marker in response.read().decode("utf-8")
+                    checking_path = path
+                    body, content_type = get_response(connection, path)
+                    if path.endswith(".js"):
+                        assert content_type == "application/javascript"
+                    assert marker in body.decode("utf-8")
+            except Exception:
+                log.flush()
+                diagnostics = Path(__file__).resolve().parents[1] / "build" / "smoke-release"
+                diagnostics.mkdir(parents=True, exist_ok=True)
+                server_log = (Path(directory) / "server.log").read_text(encoding="utf-8", errors="replace")
+                saved = diagnostics / f"web-failure-{time.time_ns()}.log"
+                saved.write_text(f"Failed request: {checking_path}\nProcess exit: {process.poll()}\n{server_log}", encoding="utf-8")
+                print(f"Packaged Web check failed at {checking_path}; diagnostics: {saved}", flush=True)
+                raise
             finally:
+                connection.close()
                 process.terminate()
                 process.wait(timeout=15)
     print("Release smoke checks passed with isolated data and a minimal PATH.")

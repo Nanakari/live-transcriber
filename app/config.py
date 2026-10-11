@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
@@ -10,80 +10,6 @@ import yaml
 
 from .utils import AppError
 
-
-DEFAULT_CONFIG: dict[str, Any] = {
-    "app": {"output_dir": "outputs", "timezone": "Asia/Tokyo"},
-    "transcribe": {
-        "quality": "high",
-        "language": "auto",
-        "device": "auto",
-        "compute_type": "int8_float16",
-        "condition_on_previous_text": True,
-    },
-    "quality_profiles": {
-        "fast": {"model": "small", "beam_size": 5, "vad_filter": True, "word_timestamps": False},
-        "accurate": {"model": "medium", "beam_size": 8, "vad_filter": True, "word_timestamps": True},
-        "cpu_safe": {
-            "model": "medium",
-            "beam_size": 5,
-            "vad_filter": True,
-            "word_timestamps": False,
-            "preferred_device": "cpu",
-            "preferred_compute_type": "int8",
-        },
-        "high": {
-            "model": "large-v3-turbo",
-            "beam_size": 5,
-            "vad_filter": True,
-            "word_timestamps": True,
-            "preferred_compute_type": "int8_float16",
-        },
-    },
-    "audio": {
-        "sample_rate": 16000,
-        "channels": 1,
-        "delete_clean_wav_after_transcribe": True,
-    },
-    "network": {"proxy": ""},
-    "features": {"summary": True, "study_notes": True, "character_profile": False},
-    "dictionary": {"terms_path": "dictionaries/vtuber_terms.txt"},
-    "cleaner": {"no_speech_prob_threshold": 0.9},
-    "runtime": {
-        "auto_add_cuda_dll_paths": True,
-        "cuda_dll_paths": [
-            ".venv/Lib/site-packages/nvidia/cublas/bin",
-            ".venv/Lib/site-packages/nvidia/cudnn/bin",
-            ".venv/Lib/site-packages/nvidia/cuda_nvrtc/bin",
-        ],
-    },
-    "analysis": {
-        "provider": "gemini",
-        "model": "gemini-3.5-flash-lite",
-        "fallback_model": "gemini-3.1-flash-lite",
-        "api_key_env": "GEMINI_API_KEY",
-        "local_command": "codex",
-        "local_model": "",
-        "local_timeout_seconds": 360,
-        "local_reasoning_effort": "medium",
-        "local_ignore_user_config": True,
-        "local_concurrency": 4,
-        "source_language": "",
-        "target_language": "zh",
-        "profile": "multilingual_study",
-        "chunk_minutes": 3,
-        "max_segments_per_chunk": 36,
-        "temperature": 0.2,
-        "max_retries": 6,
-        "invalid_json_retries": 3,
-        "retry_backoff_seconds": 10,
-        "request_timeout_seconds": 300,
-        "request_interval_seconds": 6,
-        "cache_enabled": True,
-        "auto_repair_enabled": True,
-        "auto_repair_threshold": 0.80,
-        "output_formats": ["json", "markdown", "srt"],
-    },
-}
 
 
 def project_root() -> Path:
@@ -112,6 +38,10 @@ def tool_path(name: str) -> Path | None:
         candidate = root / "tools" / f"{name}{suffix}"
         if candidate.is_file():
             return candidate
+    if name in {"ffplay", "ffprobe"}:
+        override = os.environ.get(f"LIVE_TRANSCRIBER_{name.upper()}", "").strip()
+        if override and (candidate := Path(override).expanduser()).is_file():
+            return candidate
     return None
 
 
@@ -137,11 +67,24 @@ def _read_config_file(config_path: Path) -> dict[str, Any]:
     return loaded
 
 
-def load_config() -> dict[str, Any]:
-    root = project_root()
+# __file__ points into the bundle in PyInstaller, too. Keep defaults beside code
+# so source and portable builds load exactly the same configuration resource.
+DEFAULT_CONFIG: dict[str, Any] = _read_config_file(Path(__file__).with_name("defaults.yaml"))
+
+
+def load_config(root: Path | None = None) -> dict[str, Any]:
+    root = root or project_root()
     config = deepcopy(DEFAULT_CONFIG)
     for name in ("config.yaml", "config.local.yaml"):
         config_path = root / name
         if config_path.exists():
             config = _deep_merge(config, _read_config_file(config_path))
     return config
+
+
+def output_root(override: str | Path | None = None, *, root: Path | None = None) -> Path:
+    """Resolve every result/cache/log path against the same configured base."""
+    root = (root or project_root()).resolve()
+    configured = override if override is not None else load_config(root)["app"]["output_dir"]
+    path = Path(configured).expanduser()
+    return (path if path.is_absolute() else root / path).resolve()

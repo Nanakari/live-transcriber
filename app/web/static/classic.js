@@ -107,7 +107,7 @@ async function loadStatus() {
     ["环境", `${status.cuda ? "CUDA" : "CPU"} · ${status.faster_whisper ? "Whisper 就绪" : "Whisper 缺失"}`],
     ["Gemini", status.gemini_api_key_detected ? "Key 已检测" : "Key 未检测"],
     ["模型", status.gemini_model || "未设置"],
-    ["工具", `${status.ffmpeg ? "ffmpeg" : "缺 ffmpeg"} · ${status.yt_dlp ? "yt-dlp" : "缺 yt-dlp"}`],
+    ["工具", `${status.ffmpeg ? "ffmpeg" : "缺 ffmpeg"} · ${status.ffplay ? "ffplay" : "缺 ffplay"} · ${status.ffprobe ? "ffprobe" : "缺 ffprobe"} · ${status.yt_dlp ? "yt-dlp" : "缺 yt-dlp"}`],
     ["默认转写", `ASR ${status.default_asr_profile || "-"}`],
   ];
   $("statusPanel").innerHTML = items.map(([name, value]) => `
@@ -223,14 +223,15 @@ function renderPreviewQuick(run, item = null) {
     return;
   }
   const files = run.files || {};
-  const video = files["live_preview.mp4"];
-  const audioLauncher = files["run_audio_subtitle_player.cmd"];
-  const audioPlayer = files["audio_subtitle_player.pyw"];
-  const audioSubtitle = files["audio_mode.bilingual.srt"];
-  const study = files["live_preview.study.srt"];
-  const bilingual = files["live_preview.bilingual.srt"];
-  const zh = files["live_preview.zh.srt"];
-  const ja = files["live_preview.ja.srt"];
+  const video = run.video_stale ? null : files["live_preview.mp4"];
+  const audioLauncher = run.audio_stale ? null : files["run_audio_subtitle_player.cmd"];
+  const audioPlayer = run.audio_stale ? null : files["audio_subtitle_player.pyw"];
+  const audioSubtitle = run.audio_stale ? null : files["audio_mode.bilingual.srt"];
+  const subtitleStale = files["live_preview.mp4"] ? run.video_stale : run.audio_stale;
+  const study = subtitleStale ? null : files["live_preview.study.srt"];
+  const bilingual = subtitleStale ? null : files["live_preview.bilingual.srt"];
+  const zh = subtitleStale ? null : files["live_preview.zh.srt"];
+  const ja = subtitleStale ? null : files["live_preview.ja.srt"];
   const readme = files["README_play.txt"];
   const primaryActions = [
     audioLauncher ? ["播放音频 + 悬挂字幕", { path: audioLauncher.path, action: "file" }, "primary-action"] : null,
@@ -248,6 +249,7 @@ function renderPreviewQuick(run, item = null) {
   ].filter(([, file]) => file);
   $("previewQuick").innerHTML = `
     <div class="result-meta"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(run.name || "")}</span></div>
+    ${run.stale ? `<p>${escapeHtml(run.stale_reason)}</p>` : ""}
     <div class="quick-actions">
       ${primaryActions.map(([label, target, cls]) => renderQuickAction(label, target, cls)).join("")}
     </div>

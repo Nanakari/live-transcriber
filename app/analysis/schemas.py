@@ -353,3 +353,4 @@ class AnalysisDocument(BaseModel):
     failed_chunks: list[FailedChunk] = Field(default_factory=list)
     video_summary: VideoSummary | None = None
     video_summary_error: str = ""
+    analysis_error: str = ""

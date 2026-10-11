@@ -5,12 +5,16 @@ import hashlib
 import importlib.metadata
 import json
 import re
-import zipfile
 import shutil
 import subprocess
 from pathlib import Path
 
 import requests
+
+if __package__:
+    from .media_tools import FFMPEG_URL, FFMPEG_SHA256, FFMPEG_VERSION, install_media_tools
+else:
+    from media_tools import FFMPEG_URL, FFMPEG_SHA256, FFMPEG_VERSION, install_media_tools
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGE = ROOT / "build" / "release-assets"
@@ -22,24 +26,7 @@ def main() -> None:
     tools_dir.mkdir(parents=True, exist_ok=True)
     licenses.mkdir(parents=True, exist_ok=True)
     # Pin and verify the static build providing all three media executables.
-    ffmpeg_url = "https://github.com/GyanD/codexffmpeg/releases/download/8.1.2/ffmpeg-8.1.2-essentials_build.zip"
-    ffmpeg_sha256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
-    archive = STAGE / "ffmpeg.zip"
-    with requests.get(ffmpeg_url, stream=True, timeout=120) as response:
-        response.raise_for_status()
-        with archive.open("wb") as handle:
-            for block in response.iter_content(1024 * 1024):
-                handle.write(block)
-    if hashlib.sha256(archive.read_bytes()).hexdigest() != ffmpeg_sha256:
-        raise RuntimeError("FFmpeg archive checksum mismatch.")
-    with zipfile.ZipFile(archive) as bundle:
-        for name in ("ffmpeg.exe", "ffplay.exe", "ffprobe.exe"):
-            member = next(item for item in bundle.namelist() if item.endswith("/bin/" + name))
-            with bundle.open(member) as source, (tools_dir / name).open("wb") as target:
-                shutil.copyfileobj(source, target)
-        for member in bundle.namelist():
-            if member.endswith("/LICENSE") or member.endswith("/README.txt"):
-                (licenses / ("FFmpeg-" + Path(member).name)).write_bytes(bundle.read(member))
+    install_media_tools(tools_dir, STAGE / "ffmpeg.zip", licenses=licenses, overwrite=True)
     node = shutil.which("node")
     if not node:
         raise RuntimeError("Install Node.js 22 LTS to build the portable YouTube runtime.")
@@ -56,7 +43,7 @@ def main() -> None:
     response.raise_for_status()
     (licenses / "Node-LICENSE.txt").write_text(response.text, encoding="utf-8")
     for name in ("COPYING.GPLv3", "COPYING.LGPLv3"):
-        response = requests.get(f"https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.1.2/{name}", timeout=60)
+        response = requests.get(f"https://raw.githubusercontent.com/FFmpeg/FFmpeg/n{FFMPEG_VERSION}/{name}", timeout=60)
         response.raise_for_status()
         (licenses / f"FFmpeg-{name}.txt").write_text(response.text, encoding="utf-8")
     ffmpeg_version = subprocess.check_output([str(tools_dir / "ffmpeg.exe"), "-version"], text=True)
@@ -78,8 +65,8 @@ def main() -> None:
                 shutil.copy2(source, target)
     (licenses / "packages.json").write_text(json.dumps(packages, indent=2), encoding="utf-8")
     (licenses / "tools.json").write_text(json.dumps({"node": version, "node_source": f"https://nodejs.org/dist/{version}/node-{version}.tar.gz",
-        "ffmpeg_binary_source": ffmpeg_url, "ffmpeg_sha256": ffmpeg_sha256,
-        "ffmpeg_source": "https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz"}, indent=2), encoding="utf-8")
+        "ffmpeg_binary_source": FFMPEG_URL, "ffmpeg_sha256": FFMPEG_SHA256,
+        "ffmpeg_source": f"https://ffmpeg.org/releases/ffmpeg-{FFMPEG_VERSION}.tar.xz"}, indent=2), encoding="utf-8")
     print(f"Prepared tools and notices: {STAGE}")
 
 

@@ -947,7 +947,11 @@ def main() -> int:
         ).run()
         return 0
     except Exception as exc:
-        if not args.check_runtime:
+        if args.check_runtime:
+            # Windowed executables have no stderr. Keep smoke failures inspectable.
+            import traceback
+            Path.cwd().joinpath("player_runtime_error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        else:
             show_error(str(exc))
         return 1
     finally:

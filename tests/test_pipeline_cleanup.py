@@ -76,6 +76,8 @@ def test_cleanup_empty_staging_removes_empty_descendants(tmp_path: Path, monkeyp
 
 
 def test_audio_preview_keeps_its_clean_wav_input(monkeypatch, tmp_path):
+    from app import preview
+    monkeypatch.setattr(preview, "_bundle_audio_runtime_tools", lambda *a: {})
     monkeypatch.setenv("LIVE_TRANSCRIBER_HOME", str(tmp_path))
     group = tmp_path / "outputs" / "media" / "sample"
     audio = group / "audio" / "sample_clean_16k.wav"

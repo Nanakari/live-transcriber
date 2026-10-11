@@ -31,5 +31,31 @@ vm.runInContext(source.slice(source.indexOf('function resultViews('), source.ind
   assert(state.readerRequest > previousRequest);
   assert.equal(elements.get('reader').attrs['aria-labelledby'], undefined);
   assert.equal(elements.get('exportLinks').children.length, 0);
+  item = {run_id: 'example', label: 'Player', preview: {files: {
+    'run_audio_subtitle_player.cmd': {path: 'outputs/player.cmd'},
+    'live_preview.mp4': {path: 'outputs/video.mp4'},
+  }, audio_stale: false, video_stale: true}};
+  await vm.runInContext('renderResults()', context);
+  const playerExports = elements.get('exportLinks').children.map(link => link.href);
+  assert.deepEqual(playerExports, ['/api/artifacts/example/player-export']);
+  item.preview.audio_stale = true;
+  await vm.runInContext('renderResults()', context);
+  assert.equal(elements.get('exportLinks').children.length, 0);
+  vm.runInContext(source.slice(source.indexOf('function updateActions('), source.indexOf('async function reanalyze(')), context);
+  await vm.runInContext('updateActions()', context);
+  assert.equal(elements.get('playBtn').disabled, true);
+  item.preview.audio_stale = false;
+  state.running = false;
+  await vm.runInContext('updateActions()', context);
+  assert.equal(elements.get('playBtn').disabled, false);
+  item.preview.audio_stale = true;
+  item.preview.video_stale = false;
+  await vm.runInContext('updateActions()', context);
+  assert.equal(elements.get('playBtn').disabled, false);
+  assert.equal(elements.get('playBtn').textContent, '播放带字幕视频');
+  assert.equal(vm.runInContext('currentPlayback(selected()).file.path', context), 'outputs/video.mp4');
+  state.running = true;
+  await vm.runInContext('updateActions()', context);
+  assert.equal(elements.get('playBtn').disabled, true);
   console.log('Workbench result regressions passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

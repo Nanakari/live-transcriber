@@ -158,6 +158,72 @@ def test_chunk_output_schema_is_strict_for_every_object() -> None:
     assert_strict(schema)
 
 
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+def test_permanent_http_errors_stop_without_sleep_or_fallback(monkeypatch, status):
+    client, logger = _client(monkeypatch, max_retries=6)
+    calls, sleeps = [], []
+    monkeypatch.setattr(gemini_client.requests, "post", lambda url, **kw:
+                        calls.append(url) or FakeResponse(status, text="invalid secret credentials"))
+    monkeypatch.setattr(gemini_client.time, "sleep", sleeps.append)
+    for _ in range(2):
+        with pytest.raises(gemini_client.PermanentAnalysisError) as failure:
+            client.generate_json_text("prompt", system_prompt="system")
+        assert "secret" not in str(failure.value)
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 503])
+def test_transient_http_errors_can_recover(monkeypatch, status):
+    client, _ = _client(monkeypatch, max_retries=2)
+    client.fallback_model = ""
+    responses = iter([FakeResponse(status, text="temporary failure"), _success_response("recovered")])
+    sleeps = []
+    monkeypatch.setattr(gemini_client.requests, "post", lambda *a, **kw: next(responses))
+    monkeypatch.setattr(gemini_client.time, "sleep", sleeps.append)
+    assert json.loads(client.generate_json_text("prompt", system_prompt="system"))["value"] == "recovered"
+    assert len(sleeps) == 1
+
+
+def test_both_models_unavailable_is_permanent(monkeypatch):
+    client, _ = _client(monkeypatch, max_retries=6)
+    calls = []
+    monkeypatch.setattr(gemini_client.requests, "post", lambda url, **kw:
+                        calls.append(url) or FakeResponse(404, text="model not found"))
+    monkeypatch.setattr(gemini_client.time, "sleep", lambda _: pytest.fail("must not sleep"))
+    with pytest.raises(gemini_client.PermanentAnalysisError):
+        client.generate_json_text("prompt", system_prompt="system")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+def test_permanent_error_stops_without_retry_or_model_fallback(monkeypatch, status):
+    client, logger = _client(monkeypatch, max_retries=6)
+    calls, sleeps = [], []
+
+    def failed_request(url, **kwargs):
+        calls.append(url)
+        return FakeResponse(status, text="invalid request or key: secret")
+
+    monkeypatch.setattr(gemini_client.requests, "post", failed_request)
+    monkeypatch.setattr(gemini_client.time, "sleep", sleeps.append)
+    for _ in range(2):
+        with pytest.raises(gemini_client.PermanentAnalysisError, match=f"HTTP {status}") as error:
+            client.generate_json_text("prompt", system_prompt="system")
+        assert "secret" not in str(error.value)
+    assert len(calls) == 1
+    assert sleeps == []
+    assert all("secret" not in message for message in logger.messages)
+
+
+def test_request_timeout_status_remains_retryable(monkeypatch):
+    client, _ = _client(monkeypatch, max_retries=1)
+    responses = iter([FakeResponse(408, text="Request timeout"), _success_response("ok")])
+    monkeypatch.setattr(gemini_client.requests, "post", lambda *a, **kw: next(responses))
+    monkeypatch.setattr(gemini_client.time, "sleep", lambda _: None)
+    assert json.loads(client.generate_json_text("prompt", system_prompt="system"))["value"] == "ok"
+
+
 def test_local_client_invokes_codex_exec_and_reads_last_message(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

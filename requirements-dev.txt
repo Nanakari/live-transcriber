@@ -1,5 +1,4 @@
 -r requirements.txt
 
-pytest>=9.0,<10.0
+-r requirements-test.txt
 pyinstaller
-httpx

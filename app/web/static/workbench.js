@@ -52,7 +52,7 @@ async function loadStatus(initial = false) {
     $("rememberKey").checked = Boolean(remembered);
   }
   $("browseBtn").hidden = !status.file_picker;
-  $("environment").textContent = `${status.cuda ? "GPU 可用" : "CPU 模式"} · ${status.ffmpeg ? "ffmpeg 就绪" : "缺少 ffmpeg，请运行安装脚本"} · ${status.faster_whisper ? "Whisper 就绪" : "缺少 Whisper"} · ${status.yt_dlp ? "视频下载工具就绪" : "缺少 yt-dlp"}`;
+  $("environment").textContent = `${status.cuda ? "GPU 可用" : "CPU 模式"} · ${status.ffmpeg ? "ffmpeg 就绪" : "缺少 ffmpeg，请运行安装脚本"} · ${status.ffplay ? "音频播放引擎就绪" : "缺少 ffplay，请运行安装脚本"} · ${status.ffprobe ? "音频时长检测就绪" : "缺少 ffprobe"} · ${status.faster_whisper ? "Whisper 就绪" : "缺少 Whisper"} · ${status.yt_dlp ? "视频下载工具就绪" : "缺少 yt-dlp"}`;
   $("dataPath").textContent = `数据目录：${status.data_dir}`;
   $("modelPath").textContent = `模型缓存：${status.models_dir}`;
   updateKeyHint();
@@ -189,9 +189,17 @@ function renderExports(item) {
     const link = node("a", label); link.href = `/api/download?path=${encodeURIComponent(file.path)}`; links.append(link);
   }
   const video = item.preview?.files?.["live_preview.mp4"];
-  if (video) { const link = node("a", "带字幕视频"); link.href = `/api/download?path=${encodeURIComponent(video.path)}`; links.append(link); }
+  if (video && !item.preview.video_stale) { const link = node("a", "带字幕视频"); link.href = `/api/download?path=${encodeURIComponent(video.path)}`; links.append(link); }
   const audioLauncher = item.preview?.files?.["run_audio_subtitle_player.cmd"];
-  if (audioLauncher) { const link = node("a", "音频播放器启动器"); link.href = `/api/download?path=${encodeURIComponent(audioLauncher.path)}`; links.append(link); }
+  if (audioLauncher && !item.preview.audio_stale) { const link = node("a", "完整音频播放器包（ZIP）"); link.href = `/api/artifacts/${encodeURIComponent(item.run_id)}/player-export`; links.append(link); }
+}
+function currentPlayback(item) {
+  const preview = item?.preview;
+  const audio = preview?.files?.["run_audio_subtitle_player.cmd"];
+  if (audio && !preview.audio_stale) return {file: audio, label: "播放音频 + 悬挂字幕"};
+  const video = preview?.files?.["live_preview.mp4"];
+  if (video && !preview.video_stale) return {file: video, label: "播放带字幕视频"};
+  return null;
 }
 function updateActions() {
   const item = selected(); if (!item) return;
@@ -200,9 +208,12 @@ function updateActions() {
   $("deleteBtn").disabled = state.running || !item.deletable;
   const audioLauncher = item.preview?.files?.["run_audio_subtitle_player.cmd"];
   const video = item.preview?.files?.["live_preview.mp4"];
+  const playback = currentPlayback(item);
   $("playBtn").hidden = !audioLauncher && !video;
-  $("playBtn").textContent = audioLauncher ? "播放音频 + 悬挂字幕" : "播放带字幕视频";
+  $("playBtn").disabled = Boolean(state.running || !playback);
+  $("playBtn").textContent = playback?.label || "请重新生成播放器";
   $("storageHint").textContent = `文件占用约 ${((item.storage_bytes || 0) / 1024 / 1024).toFixed(1)} MB。重新分析会复用相同参数下成功的分段。`;
+  if (item.preview?.stale) $("storageHint").textContent += ` ${item.preview.stale_reason}`;
 }
 async function reanalyze() {
   const item = selected(); if (!item?.transcript) return;
@@ -225,7 +236,7 @@ $("openDataBtn").addEventListener("click", safe(() => post("/api/open-folder", {
 $("folderBtn").addEventListener("click", safe(() => post("/api/open-folder", {path: selected()?.group_path || selected()?.transcript?.path})));
 $("reanalyzeBtn").addEventListener("click", safe(() => reanalyze()));
 $("previewBtn").addEventListener("click", safe(async () => { const item = selected(); await startJob("/api/preview", {audio: (item.audio || item.clean_audio).path, subtitle: item.analysis.files["translation_zh.srt"].path, artifact_run_id: item.run_id, mode: $("previewMode").value}); }));
-$("playBtn").addEventListener("click", safe(() => { const files = selected().preview.files; const target = files["run_audio_subtitle_player.cmd"] || files["live_preview.mp4"]; return post("/api/open-file", {path: target.path}); }));
+$("playBtn").addEventListener("click", safe(() => { const playback = currentPlayback(selected()); if (playback) return post("/api/open-file", {path: playback.file.path}); }));
 $("deleteBtn").addEventListener("click", safe(async () => {
   const item = selected();
   if (!item || !confirm(`删除“${item.label}”的处理结果、缓存音频和预览文件？原始输入文件不会删除。`)) return;

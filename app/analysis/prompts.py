@@ -8,7 +8,7 @@ from .chunker import chunk_to_prompt_payload
 from .schemas import AnalysisChunk, AnalysisSegment, ChunkAnalysisResult, VideoSummary
 
 
-PROMPT_VERSION = "multilingual-study-v11-high-confidence-source-repair"
+PROMPT_VERSION = "multilingual-study-v12-source-alignment"
 
 SYSTEM_PROMPT = """你是一个多语言影音文本的中文自然翻译与内容提炼助手。
 你的主任务是生成按时间对齐的自然中文翻译，并提取少量真正重要的视频要点。
@@ -131,6 +131,7 @@ target_language: {target_language}
 18. repair_confidence 是对 corrected_original 与实际语音完全一致的 0-1 估计，不能复用 translation 的 confidence；只有提供 corrected_original 时才填写，否则为 0。
 19. repair_reason 说明为何可以进行源语言修复；auto_repaired 必须始终返回 false，实际是否自动采用由程序按阈值决定。
 20. 学习资料宁缺毋滥，不要编造词义、语法或复查问题；所有学习资料字段都必须是数组。
+21. bilingual_lines 和带 segment_id 的 review_items 如返回 original/start/end，必须逐字复制该 segment 的 text/start/end，不得改写、留空或使用其他片段的值；修复建议仅放入 corrected_original。
 
 JSON 结构示例：
 {json.dumps(JSON_SCHEMA_HINT, ensure_ascii=False, indent=2)}

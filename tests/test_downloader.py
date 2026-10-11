@@ -228,3 +228,127 @@ def test_audio_download_ignores_incomplete_part_files(
         )
 
     assert "没有找到下载后的音频文件" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(("title", "directory_name"), [
+    ("Lesson [01]", "audio"),
+    ("中文 [LIVE] 100%", "audio"),
+    ("Title %(id)s", "audio"),
+    ("Plain title", "%(id)s [audio]"),
+])
+def test_download_titles_and_parent_paths_are_literal(monkeypatch, tmp_path, title, directory_name):
+    _configure_audio_download_test(monkeypatch)
+    monkeypatch.setattr(downloader, "fetch_video_info", lambda *args, **kwargs: {"title": title})
+    audio_dir = tmp_path / directory_name
+    audio_dir.mkdir()
+    written = []
+
+    def fake_run(command, logger, *, stream_output=False):
+        # Exercise printf template expansion, including literal % in ancestors.
+        template = command[command.index("-o") + 1]
+        path = Path(template % {"ext": "m4a", "id": "expanded-id"})
+        assert path.parent.resolve() == audio_dir.resolve()
+        path.write_bytes(b"complete audio")
+        written.append(path)
+        return subprocess.CompletedProcess(command, 0, "downloaded", "")
+
+    monkeypatch.setattr(downloader, "run_subprocess", fake_run)
+    result, result_title = downloader.download_audio(
+        "https://example.invalid/media", audio_dir, "run-abcd", None, RunLogger(tmp_path / "run.log"),
+    )
+
+    assert result == written[0]
+    assert result_title == title
+    assert title in result.name
+
+
+@pytest.mark.parametrize("section", [False, True])
+@pytest.mark.parametrize("info", [
+    {"title": r"..\..\escaped"},
+    {"channel": r"..\..\Creator", "title": "Lesson"},
+    {"title": "bad\x00name\x1ftitle"},
+])
+def test_metadata_cannot_create_directories_or_escape_download_root(monkeypatch, tmp_path, info, section):
+    _configure_audio_download_test(monkeypatch)
+    monkeypatch.setattr(downloader, "fetch_video_info", lambda *args, **kwargs: info)
+    audio_dir = tmp_path / "staging" / "audio"
+    audio_dir.mkdir(parents=True)
+
+    def write_checked(path):
+        assert path.resolve().parent == audio_dir.resolve()
+        assert not any(char in path.name for char in "\\/\x00\x1f")
+        path.write_bytes(b"complete audio")
+
+    def fake_run(command, logger, *, stream_output=False):
+        write_checked(Path(command[command.index("-o") + 1] % {"ext": "m4a"}))
+        return subprocess.CompletedProcess(command, 0, "downloaded", "")
+
+    monkeypatch.setattr(downloader, "run_subprocess", fake_run)
+    monkeypatch.setattr(downloader, "_download_audio_section_with_ffmpeg",
+                        lambda command, url, output, *args, **kwargs: write_checked(output))
+    result, _ = downloader.download_audio(
+        "https://example.invalid/media", audio_dir, "run-abcd", None, RunLogger(tmp_path / "run.log"),
+        download_start="0" if section else None, download_end="1" if section else None,
+    )
+
+    assert result.resolve().parent == audio_dir.resolve()
+
+
+@pytest.mark.parametrize("section", [False, True])
+def test_download_checks_output_boundary_before_starting_tools(monkeypatch, tmp_path, section):
+    _configure_audio_download_test(monkeypatch)
+    monkeypatch.setattr(downloader, "_build_media_stem", lambda *args: "../escaped")
+
+    def unexpected_tool(*args, **kwargs):
+        pytest.fail("An unsafe output path reached an external tool")
+
+    monkeypatch.setattr(downloader, "run_subprocess", unexpected_tool)
+    monkeypatch.setattr(downloader, "_download_audio_section_with_ffmpeg", unexpected_tool)
+    with pytest.raises(AppError):
+        downloader.download_audio(
+            "https://example.invalid/media", tmp_path, "run-abcd", None, RunLogger(tmp_path / "run.log"),
+            download_start="0" if section else None, download_end="1" if section else None,
+        )
+
+
+def test_thumbnail_uses_literal_safe_name_and_template(monkeypatch, tmp_path):
+    _configure_audio_download_test(monkeypatch)
+    thumbnails = tmp_path / "%(id)s [thumbnails]"
+    written = []
+
+    def fake_run(command, logger, *, stream_output=False):
+        path = Path(command[command.index("-o") + 1] % {"ext": "jpg", "id": "expanded-id"})
+        assert path.parent.resolve() == thumbnails.resolve()
+        path.write_bytes(b"thumbnail")
+        written.append(path)
+        return subprocess.CompletedProcess(command, 0, "downloaded", "")
+
+    monkeypatch.setattr(downloader, "run_subprocess", fake_run)
+    result = downloader.download_thumbnail(
+        "https://example.invalid/media", thumbnails, "Lesson [01] %(id)s", None, RunLogger(tmp_path / "run.log"),
+    )
+
+    assert result == written[0]
+    assert "Lesson [01] %(id)s" in result.name
+
+
+def test_existing_output_symlink_cannot_redirect_a_download(monkeypatch, tmp_path):
+    _configure_audio_download_test(monkeypatch)
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    outside = tmp_path / "keep.m4a"
+    outside.write_bytes(b"keep existing data")
+    try:
+        (audio_dir / "un-1_source.m4a").symlink_to(outside)
+    except OSError:
+        pytest.skip("Creating symlinks requires Windows developer mode or elevated rights")
+
+    def unexpected_tool(*args, **kwargs):
+        pytest.fail("A symlink redirected the download outside its directory")
+
+    monkeypatch.setattr(downloader, "run_subprocess", unexpected_tool)
+    with pytest.raises(AppError):
+        downloader.download_audio(
+            "https://example.invalid/media", audio_dir, "run-1", None, RunLogger(tmp_path / "run.log"),
+        )
+    assert outside.read_bytes() == b"keep existing data"

@@ -9,7 +9,9 @@ from pathlib import Path
 from .schemas import AnalysisChunk, AnalysisDocument, ChunkAnalysisResult, VideoSummary
 
 
-CACHE_KEY_VERSION = 2
+# Earlier caches may contain misaligned responses whose source fields were
+# overwritten before validation. Their lost evidence cannot be rechecked.
+CACHE_KEY_VERSION = 3
 
 
 def cache_key(
