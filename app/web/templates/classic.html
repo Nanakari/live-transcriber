@@ -62,6 +62,9 @@
             <label class="check"><input name="module_analyze" type="checkbox" checked> 翻译与研析</label>
             <label class="check"><input name="module_preview" type="checkbox" checked> 音频播放器 + 悬挂字幕</label>
           </div>
+          <label>跳过翻译时使用的字幕（可选）
+            <div class="picker-row"><input name="subtitle" id="pipelineSubtitlePath" placeholder="选择与本次媒体对应的 SRT 字幕"><button class="browse-btn" type="button" data-browse-kind="subtitle" data-browse-target="pipelineSubtitlePath">选择文件</button></div>
+          </label>
           <div class="row">
             <label>原文语言
               <select name="language">

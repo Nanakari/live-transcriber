@@ -226,7 +226,9 @@ def start_pipeline(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     else:
         _append_optional(command, "--transcript", payload.get("transcript"))
         _append_optional(command, "--audio", payload.get("audio"))
-        _append_optional(command, "--subtitle", payload.get("subtitle"))
+    _append_optional(command, "--subtitle", payload.get("subtitle"))
+    if "preview" in modules and "analyze" not in modules and not str(payload.get("subtitle") or "").strip():
+        raise HTTPException(status_code=400, detail="跳过翻译与研析时，请选择预览使用的字幕文件。")
 
     _append_optional(command, "--language", payload.get("language"))
     _append_optional(command, "--quality", payload.get("quality") or default_quality)
@@ -566,10 +568,11 @@ def _delete_artifact_run(run_id: str, root: Path) -> dict[str, Any]:
 
 
 def is_port_available(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
-        try:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
             sock.bind((host, port))
             return True
-        except OSError:
-            return False
+    except OSError:
+        return False
