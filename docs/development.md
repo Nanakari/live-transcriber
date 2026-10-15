@@ -74,6 +74,6 @@ Web 检查使用持久连接并完整读取响应；失败时保留 `build/smoke
 
 - `.github/workflows/ci.yml`：Windows / Ubuntu、Python 3.10 / 3.12 的检查矩阵。
 - `release.yml`：`v*` 标签触发 Windows 构建并创建草稿 Release；手动运行只上传构建附件。
-- `publish-verified.yml`：显式运行后核验构建与 CI、草稿提交、ZIP 和校验和，再发布。
+- `publish-verified.yml`：显式运行后核验标签实际提交与成功构建、同一提交的 CI、ZIP 和校验和，再发布。标准构建已上传的附件会按内容校验后复用，只上传缺失附件；同名附件内容不一致会停止，不覆盖。草稿上传中断后可重试，已发布且附件一致时重试不再改动 Release。
 
 本地构建不代表已经发布。提交前先看 `git diff`，确认没有密钥、私有媒体、结果、模型或生成文件。模块职责和资源位置见 [工程结构](architecture.md)。

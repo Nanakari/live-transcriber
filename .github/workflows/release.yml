@@ -40,4 +40,5 @@ jobs:
             exit 0
           }
           $assets = Get-ChildItem dist -File | Where-Object { $_.Extension -in '.zip', '.sha256' } | ForEach-Object FullName
-          gh release create $env:GITHUB_REF_NAME --verify-tag --draft --generate-notes @assets
+          gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --verify-tag --draft --generate-notes @assets
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to create draft release.' }

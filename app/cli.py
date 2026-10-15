@@ -710,7 +710,8 @@ def handle_web(args: argparse.Namespace) -> int:
     if args.host == "0.0.0.0":
         _print("警告：当前监听 0.0.0.0，可能暴露到局域网。仅在你明确需要时使用。")
 
-    url = f"http://{args.host}:{port}"
+    url_host = f"[{args.host}]" if ":" in args.host else args.host
+    url = f"http://{url_host}:{port}"
     _print(f"多语言影音研析已启动：{url}")
     should_open_browser = args.open_browser or (getattr(sys, "frozen", False) and not args.no_browser)
     if should_open_browser:

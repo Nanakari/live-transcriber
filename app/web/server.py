@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import mimetypes
+import re
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from ..config import resource_root
@@ -18,12 +18,16 @@ def create_app() -> FastAPI:
     mimetypes.add_type("application/javascript", ".js")
     mimetypes.add_type("text/css", ".css")
     app = FastAPI(title="多语言影音研析")
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
 
     @app.middleware("http")
     async def local_requests(request: Request, call_next):
+        # The pinned TrustedHostMiddleware splits at the first colon, which
+        # rejects bracketed IPv6 hosts. Validate the complete local authority.
+        host = request.headers.get("host", "")
+        if not re.fullmatch(r"(?:localhost|127\.0\.0\.1|\[::1\]|testserver)(?::[0-9]{1,5})?", host, re.IGNORECASE):
+            return JSONResponse({"detail": "Invalid host header"}, status_code=400)
         origin = request.headers.get("origin")
-        expected = f"{request.url.scheme}://{request.headers.get('host', '')}"
+        expected = f"{request.url.scheme}://{host}"
         if request.headers.get("sec-fetch-site") == "cross-site" or (origin and origin != expected):
             return JSONResponse({"detail": "仅接受本机页面的请求。"}, status_code=403)
         response = await call_next(request)
